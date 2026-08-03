@@ -36,10 +36,18 @@ def init_db():
             base_qqq_price REAL,
             base_goog_price REAL,
             is_waiting_trade INTEGER,
-            last_notify_time REAL
+            last_notify_time REAL,
+            last_daily_chart_date TEXT
         )
     """
     )
+    
+    # 檢查並動態補充欄位 (相容舊資料庫)
+    c.execute("PRAGMA table_info(state)")
+    columns = [col[1] for col in c.fetchall()]
+    if "last_daily_chart_date" not in columns:
+        c.execute("ALTER TABLE state ADD COLUMN last_daily_chart_date TEXT DEFAULT ''")
+
     c.execute(
         """
         CREATE TABLE IF NOT EXISTS trade_history (
@@ -57,8 +65,8 @@ def init_db():
     if c.fetchone()[0] == 0:
         c.execute(
             """
-            INSERT INTO state (id, current_hold, base_qqq_price, base_goog_price, is_waiting_trade, last_notify_time)
-            VALUES (1, 'GOOG', 297.03, 348.00, 0, 0)
+            INSERT INTO state (id, current_hold, base_qqq_price, base_goog_price, is_waiting_trade, last_notify_time, last_daily_chart_date)
+            VALUES (1, 'GOOG', 297.03, 348.00, 0, 0, '')
         """
         )
         c.execute(
@@ -76,7 +84,7 @@ def get_state():
     c = conn.cursor()
     c.execute(
         "SELECT current_hold, base_qqq_price, base_goog_price,"
-        " is_waiting_trade, last_notify_time FROM state WHERE id=1"
+        " is_waiting_trade, last_notify_time, last_daily_chart_date FROM state WHERE id=1"
     )
     row = c.fetchone()
     conn.close()
@@ -86,6 +94,7 @@ def get_state():
         "base_goog": row[2],
         "is_waiting": row[3],
         "last_notify_time": row[4],
+        "last_daily_chart_date": row[5] if len(row) > 5 and row[5] else "",
     }
 
 
@@ -127,12 +136,26 @@ def update_notify_status(is_waiting, notify_time):
     conn.close()
 
 
+def update_daily_chart_date(today_str):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute(
+        """
+        UPDATE state 
+        SET last_daily_chart_date = ?
+        WHERE id = 1
+    """,
+        (today_str,),
+    )
+    conn.commit()
+    conn.close()
+
+
 # ==========================================
 # 3. 雙平台訊息發送功能 (TG + LINE)
 # ==========================================
 def send_telegram_msg(text):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ 未設定 TELEGRAM_TOKEN 或 TELEGRAM_CHAT_ID")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
@@ -140,13 +163,21 @@ def send_telegram_msg(text):
         "text": text,
         "parse_mode": "Markdown",
     }
-    res = requests.post(url, json=payload)
-    print(f"Telegram API 響應狀態: {res.status_code}")
+    requests.post(url, json=payload)
+
+
+def send_telegram_photo(photo_path):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+    with open(photo_path, "rb") as photo:
+        payload = {"chat_id": TELEGRAM_CHAT_ID}
+        files = {"photo": photo}
+        requests.post(url, data=payload, files=files)
 
 
 def send_line_msg(text):
     if not LINE_ACCESS_TOKEN or not LINE_USER_ID:
-        print("⚠️ 未設定 LINE_ACCESS_TOKEN 或 LINE_USER_ID")
         return
     clean_text = (
         text.replace("*", "").replace("`", "").replace("-------------------", "----------------")
@@ -157,11 +188,10 @@ def send_line_msg(text):
         "Authorization": f"Bearer {LINE_ACCESS_TOKEN}",
     }
     payload = {
-        "to": LINE_USER_ID,
+        "to": LINE_USER_ID.strip(),
         "messages": [{"type": "text", "text": clean_text}],
     }
-    res = requests.post(url, headers=headers, json=payload)
-    print(f"LINE API 響應狀態: {res.status_code}")
+    requests.post(url, headers=headers, json=payload)
 
 
 def send_dual_notify(text):
@@ -274,6 +304,7 @@ def generate_chart():
 def check_intraday_signal(is_manual=False):
     state = get_state()
     now_ts = time.time()
+    today_str = pd.Timestamp.now().strftime("%Y-%m-%d")
 
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -306,9 +337,7 @@ def check_intraday_signal(is_manual=False):
     else:
         diff_pct = (diff if curr_hold == "QQQM" else -diff) * 100
 
-    print(f"DEBUG: QQQM 現價={p_qqq}, GOOG 現價={p_goog}, 價差變動={diff_pct:.2f}%, 觸發狀態={triggered}")
-
-    # 情境 A：等待轉單狀態（滿 1 小時發送催促通知）
+    # 情境 A：等待轉單狀態
     if state["is_waiting"] == 1:
         if now_ts - state["last_notify_time"] >= 3600 or is_manual:
             est_cash = current_shares * (p_qqq if curr_hold == "QQQM" else p_goog)
@@ -326,6 +355,9 @@ def check_intraday_signal(is_manual=False):
 
             send_dual_notify(msg)
             update_notify_status(1, now_ts)
+
+            chart_path = generate_chart()
+            send_telegram_photo(chart_path)
         return
 
     # 情境 B：首次觸發轉單門檻 (7%)
@@ -348,18 +380,29 @@ def check_intraday_signal(is_manual=False):
 
         send_dual_notify(msg)
         update_notify_status(1, now_ts)
+
+        chart_path = generate_chart()
+        send_telegram_photo(chart_path)
         return
 
-    # 情境 C：手動觸發但未達轉單門檻 -> 主動回報現價與價差
-    if is_manual and not triggered:
-        msg = f"ℹ️ *【手動檢查狀態報告】*\n\n"
-        msg += f"當前持股：`{curr_hold}` ({current_shares} 股)\n"
-        msg += f"QQQM 現價：`${p_qqq:.2f}` (基準價 ${state['base_qqq']:.2f})\n"
-        msg += f"GOOG 現價：`${p_goog:.2f}` (基準價 ${state['base_goog']:.2f})\n"
-        msg += f"相對價差變動：`{diff_pct:.2f}%` (門檻 7%)\n\n"
-        msg += f"📌 **結論：目前未達 7% 轉單門檻，維持原持股即可。**"
+    # 情境 C：未達 7% 門檻（手動檢查 OR 每日自動傳送一次圖表）
+    if not triggered:
+        should_send_daily = state["last_daily_chart_date"] != today_str
 
-        send_dual_notify(msg)
+        if is_manual or should_send_daily:
+            msg = f"ℹ️ *【每日策略狀態報告】*\n\n" if should_send_daily and not is_manual else f"ℹ️ *【手動檢查狀態報告】*\n\n"
+            msg += f"當前持股：`{curr_hold}` ({current_shares} 股)\n"
+            msg += f"QQQM 現價：`${p_qqq:.2f}` (基準價 ${state['base_qqq']:.2f})\n"
+            msg += f"GOOG 現價：`${p_goog:.2f}` (基準價 ${state['base_goog']:.2f})\n"
+            msg += f"相對價差變動：`{diff_pct:.2f}%` (門檻 7%)\n\n"
+            msg += f"📌 **結論：目前未達 7% 轉單門檻，維持原持股即可。**"
+
+            send_dual_notify(msg)
+
+            chart_path = generate_chart()
+            send_telegram_photo(chart_path)
+
+            update_daily_chart_date(today_str)
 
 
 # ==========================================
@@ -411,6 +454,17 @@ async def traded_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def img_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await update.message.reply_text("📊 正在繪製最新實盤資產走勢圖...")
+        chart_path = generate_chart()
+        await context.bot.send_photo(
+            chat_id=update.effective_chat.id, photo=open(chart_path, "rb")
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ 繪製圖片失敗: {e}")
+
+
 # ==========================================
 # 7. 主程式
 # ==========================================
@@ -428,6 +482,7 @@ if __name__ == "__main__":
             try:
                 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
                 app.add_handler(CommandHandler("traded", traded_command))
+                app.add_handler(CommandHandler(["img", "IMG"], img_command))
 
                 job_q = getattr(app, "job_queue", None)
                 if job_q is not None:
