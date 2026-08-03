@@ -308,7 +308,7 @@ def check_intraday_signal(is_manual=False):
 
     print(f"DEBUG: QQQM 現價={p_qqq}, GOOG 現價={p_goog}, 價差變動={diff_pct:.2f}%, 觸發狀態={triggered}")
 
-    # 情境 A：等待轉單狀態
+    # 情境 A：等待轉單狀態（滿 1 小時發送催促通知）
     if state["is_waiting"] == 1:
         if now_ts - state["last_notify_time"] >= 3600 or is_manual:
             est_cash = current_shares * (p_qqq if curr_hold == "QQQM" else p_goog)
@@ -320,7 +320,8 @@ def check_intraday_signal(is_manual=False):
             msg += f"1. **賣出 {curr_hold}**：`{current_shares}` 股\n"
             msg += f"2. **買入 {target_hold}**：預估 `{est_buy_shares}` 股\n\n"
             msg += f"-----------------------------------\n"
-            msg += f"💡 *完成後請至 Telegram 點擊指令複製並貼回更新：*\n\n"
+            msg += f"💡 *完成後請至 Telegram 點擊指令複製並貼回更新：*\n"
+            msg += f"*(三個數字依序為：QQQM單價 / GOOG單價 / 買入股數)*\n\n"
             msg += f"`/traded {target_hold} {p_qqq:.2f} {p_goog:.2f} {est_buy_shares}`"
 
             send_dual_notify(msg)
@@ -341,14 +342,15 @@ def check_intraday_signal(is_manual=False):
         msg += f"2. **買入 {target_hold}**：預估可買入 `{est_buy_shares}` 股\n"
         msg += f"*(⚠️ 注意：請僅操作上述股數，勿動到其他長期持有的部位)*\n\n"
         msg += f"-----------------------------------\n"
-        msg += f"💡 *完成後請至 Telegram 點擊指令複製並貼回更新：*\n\n"
+        msg += f"💡 *完成後請至 Telegram 點擊指令複製並貼回更新：*\n"
+        msg += f"*(三個數字依序為：QQQM單價 / GOOG單價 / 買入股數)*\n\n"
         msg += f"`/traded {target_hold} {p_qqq:.2f} {p_goog:.2f} {est_buy_shares}`"
 
         send_dual_notify(msg)
         update_notify_status(1, now_ts)
         return
 
-    # 情境 C：手動觸發但未達轉單門檻
+    # 情境 C：手動觸發但未達轉單門檻 -> 主動回報現價與價差
     if is_manual and not triggered:
         msg = f"ℹ️ *【手動檢查狀態報告】*\n\n"
         msg += f"當前持股：`{curr_hold}` ({current_shares} 股)\n"
