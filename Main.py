@@ -20,11 +20,12 @@ LINE_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN")
 LINE_USER_ID = os.environ.get("LINE_USER_ID")
 
 DB_FILE = "strategy_data.db"
+CONFIG_FILE = "config.csv"
 THRESHOLD = 0.07  # 7% 門檻
 
 
 # ==========================================
-# 2. 資料庫初始化與讀寫 (SQLite)
+# 2. 資料庫初始化與讀寫 (SQLite + config.csv)
 # ==========================================
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -63,17 +64,38 @@ def init_db():
 
     c.execute("SELECT COUNT(*) FROM state")
     if c.fetchone()[0] == 0:
+        if os.path.exists(CONFIG_FILE):
+            df_cfg = pd.read_csv(CONFIG_FILE)
+            cfg = df_cfg.iloc[0].to_dict()
+        else:
+            cfg = {
+                "current_hold": "GOOG",
+                "base_qqq_price": 297.03,
+                "base_goog_price": 348.00,
+                "shares_held": 85.35172,
+                "trade_date": "2026-06-15",
+                "action": "BUY_GOOG",
+            }
+
         c.execute(
             """
             INSERT INTO state (id, current_hold, base_qqq_price, base_goog_price, is_waiting_trade, last_notify_time, last_daily_chart_date)
-            VALUES (1, 'GOOG', 297.03, 348.00, 0, 0, '')
-        """
+            VALUES (1, ?, ?, ?, 0, 0, '')
+        """,
+            (str(cfg["current_hold"]), float(cfg["base_qqq_price"]), float(cfg["base_goog_price"])),
         )
         c.execute(
             """
             INSERT INTO trade_history (trade_date, action, qqq_price, goog_price, shares_held)
-            VALUES ('2026-06-15', 'BUY_GOOG', 297.03, 348.00, 85.35172)
-        """
+            VALUES (?, ?, ?, ?, ?)
+        """,
+            (
+                str(cfg["trade_date"]),
+                str(cfg["action"]),
+                float(cfg["base_qqq_price"]),
+                float(cfg["base_goog_price"]),
+                float(cfg["shares_held"]),
+            ),
         )
         conn.commit()
     conn.close()
@@ -522,8 +544,12 @@ async def img_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==========================================
-# 7. 主程式
+# 7. 主程式 (非同步 JobQueue)
 # ==========================================
+async def scheduled_check_job(context: ContextTypes.DEFAULT_TYPE):
+    check_intraday_signal(is_manual=False)
+
+
 if __name__ == "__main__":
     init_db()
 
@@ -543,7 +569,7 @@ if __name__ == "__main__":
                 job_q = getattr(app, "job_queue", None)
                 if job_q is not None:
                     job_q.run_repeating(
-                        lambda ctx: check_intraday_signal(is_manual=False),
+                        scheduled_check_job,
                         interval=900,
                         first=10,
                     )
