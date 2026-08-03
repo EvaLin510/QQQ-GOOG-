@@ -55,7 +55,6 @@ def init_db():
 
     c.execute("SELECT COUNT(*) FROM state")
     if c.fetchone()[0] == 0:
-        # 請確保這裡的基準價格填入 2026-06-15 當天成交的 QQQ 與 GOOG 價格
         c.execute(
             """
             INSERT INTO state (id, current_hold, base_qqq_price, base_goog_price, is_waiting_trade, last_notify_time)
@@ -346,7 +345,7 @@ def check_intraday_signal(is_manual=False):
     # 情境 C：手動觸發但未達轉單門檻 -> 主動回報現價與價差
     if is_manual and not triggered:
         msg = f"ℹ️ *【手動檢查狀態報告】*\n\n"
-        msg += f"當前持股：`{curr_hold}`\n"
+        msg += f"當前持股：`{curr_hold}` ({current_shares} 股)\n"
         msg += f"QQQ 現價：`${p_qqq:.2f}` (基準價 ${state['base_qqq']:.2f})\n"
         msg += f"GOOG 現價：`${p_goog:.2f}` (基準價 ${state['base_goog']:.2f})\n"
         msg += f"相對價差變動：`{diff_pct:.2f}%` (門檻 7%)\n\n"
@@ -384,7 +383,7 @@ async def traded_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"QQQ 新基準價：`${new_qqq:.2f}`\n"
             f"GOOG 新基準價：`${new_goog:.2f}`"
         )
-        
+
         send_line_msg(success_msg)
 
         await update.message.reply_text(
