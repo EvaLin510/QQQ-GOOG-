@@ -414,20 +414,19 @@ if __name__ == "__main__":
         print("🔍 執行單次手動狀態檢查...")
         check_intraday_signal(is_manual=True)
 
-    # 2. 常駐監控模式 (供 local 或 24H 伺服器使用)
+    # 2. 常駐監控模式
     else:
         if not TELEGRAM_TOKEN:
-            print("⚠️ 未偵測到 TELEGRAM_TOKEN，改執行單次檢查...")
+            print("⚠️ 未設定 TELEGRAM_TOKEN，改執行單次檢查...")
             check_intraday_signal(is_manual=True)
         else:
             try:
                 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
                 app.add_handler(CommandHandler("traded", traded_command))
 
-                # 安全存取 job_queue，避免 NoneType 報錯
-                job_queue = getattr(app, "job_queue", None)
-                if job_queue is not None:
-                    job_queue.run_repeating(
+                job_q = getattr(app, "job_queue", None)
+                if job_q is not None:
+                    job_q.run_repeating(
                         lambda ctx: check_intraday_signal(is_manual=False),
                         interval=900,
                         first=10,
@@ -435,9 +434,7 @@ if __name__ == "__main__":
                     print("🤖 盤中監控與 TG/LINE 雙推播系統已啟動...")
                     app.run_polling()
                 else:
-                    print("⚠️ 未載入 JobQueue，執行單次檢查後結束...")
+                    print("⚠️ 未載入 JobQueue，改執行單次檢查...")
                     check_intraday_signal(is_manual=True)
             except Exception as e:
-                print(f"❌ 啟動 Bot 失敗: {e}")git add .
-git commit -m "Fix requirements quote and bypass job_queue on manual run"
-git push origin main
+                print(f"❌ 啟動 Bot 失敗: {e}")
