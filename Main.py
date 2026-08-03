@@ -218,7 +218,13 @@ def generate_chart():
     trade_dates = []
 
     current_idx = 0
-    current_shares = trades_df["shares_held"].iloc[0]
+    init_shares = trades_df["shares_held"].iloc[0]
+    init_goog_price = trades_df["goog_price"].iloc[0]
+    init_qqq_price = trades_df["qqq_price"].iloc[0]
+
+    init_cap = init_shares * init_goog_price
+
+    current_shares = init_shares
     current_hold = (
         "GOOG" if "GOOG" in trades_df["action"].iloc[0] else "QQQM"
     )
@@ -242,37 +248,41 @@ def generate_chart():
         portfolio_values.append(val)
 
     df["My_Portfolio"] = portfolio_values
-    init_cap = 100000.0
-    df["B&H_QQQM"] = (
-        init_cap / trades_df["qqq_price"].iloc[0]
-    ) * df["QQQM"]
-    df["B&H_GOOG"] = (
-        init_cap / trades_df["goog_price"].iloc[0]
-    ) * df["GOOG"]
+    df["B&H_QQQM"] = (init_cap / init_qqq_price) * df["QQQM"]
+    df["B&H_GOOG"] = (init_cap / init_goog_price) * df["GOOG"]
+
+    # 計算最新總金額與累積報酬率 %
+    last_my_val = df["My_Portfolio"].iloc[-1]
+    last_qqq_val = df["B&H_QQQM"].iloc[-1]
+    last_goog_val = df["B&H_GOOG"].iloc[-1]
+
+    ret_my = ((last_my_val - init_cap) / init_cap) * 100
+    ret_qqq = ((last_qqq_val - init_cap) / init_cap) * 100
+    ret_goog = ((last_goog_val - init_cap) / init_cap) * 100
 
     plt.figure(figsize=(10, 5))
     plt.plot(
         df.index,
         df["My_Portfolio"],
-        label="My Live Strategy (7%)",
+        label=f"My Live Strategy: ${last_my_val:,.0f} ({ret_my:+.2f}%)",
         color="red",
         linewidth=2,
     )
     plt.plot(
         df.index,
         df["B&H_QQQM"],
-        label="Buy & Hold QQQM",
+        label=f"Buy & Hold QQQM: ${last_qqq_val:,.0f} ({ret_qqq:+.2f}%)",
         color="blue",
         linestyle="--",
-        alpha=0.5,
+        alpha=0.6,
     )
     plt.plot(
         df.index,
         df["B&H_GOOG"],
-        label="Buy & Hold GOOG",
+        label=f"Buy & Hold GOOG: ${last_goog_val:,.0f} ({ret_goog:+.2f}%)",
         color="green",
         linestyle="--",
-        alpha=0.5,
+        alpha=0.6,
     )
 
     for t_date in trade_dates:
@@ -288,7 +298,7 @@ def generate_chart():
     plt.title("Live Performance: Real-time Portfolio vs B&H (7% Threshold)")
     plt.xlabel("Date")
     plt.ylabel("Value (USD)")
-    plt.legend()
+    plt.legend(loc="upper left")
     plt.grid(True, linestyle=":", alpha=0.6)
     plt.tight_layout()
 
@@ -296,7 +306,6 @@ def generate_chart():
     plt.savefig(chart_file)
     plt.close()
     return chart_file
-
 
 # ==========================================
 # 5. 盤中監控與手動/自動訊號回覆邏輯
