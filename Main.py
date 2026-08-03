@@ -1,7 +1,5 @@
 import sys
 import os
-import sqlite3
-import time
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -16,147 +14,12 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 LINE_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN")
 LINE_USER_ID = os.environ.get("LINE_USER_ID")
 
-DB_FILE = "strategy_data.db"
 CONFIG_FILE = "config.csv"
 THRESHOLD = 0.07  # 7% 門檻
 
 
 # ==========================================
-# 2. 資料庫初始化與讀寫 (SQLite + config.csv 多列歷史紀錄)
-# ==========================================
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS state (
-            id INTEGER PRIMARY KEY,
-            current_hold TEXT,
-            base_qqq_price REAL,
-            base_goog_price REAL,
-            is_waiting_trade INTEGER,
-            last_notify_time REAL,
-            last_daily_chart_date TEXT
-        )
-    """
-    )
-
-    c.execute("PRAGMA table_info(state)")
-    columns = [col[1] for col in c.fetchall()]
-    if "last_daily_chart_date" not in columns:
-        c.execute("ALTER TABLE state ADD COLUMN last_daily_chart_date TEXT DEFAULT ''")
-
-    c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS trade_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            trade_date TEXT,
-            action TEXT,
-            qqq_price REAL,
-            goog_price REAL,
-            shares_held REAL
-        )
-    """
-    )
-
-    c.execute("SELECT COUNT(*) FROM state")
-    if c.fetchone()[0] == 0:
-        if os.path.exists(CONFIG_FILE):
-            df_cfg = pd.read_csv(CONFIG_FILE)
-            
-            # 1. 匯入 config.csv 內所有的歷史轉單紀錄
-            for _, row in df_cfg.iterrows():
-                c.execute(
-                    """
-                    INSERT INTO trade_history (trade_date, action, qqq_price, goog_price, shares_held)
-                    VALUES (?, ?, ?, ?, ?)
-                """,
-                    (
-                        str(row["trade_date"]),
-                        str(row["action"]),
-                        float(row["base_qqq_price"]),
-                        float(row["base_goog_price"]),
-                        float(row["shares_held"]),
-                    ),
-                )
-            
-            # 2. 讀取最新一筆（最後一行）寫入當前 state
-            last_cfg = df_cfg.iloc[-1].to_dict()
-            c.execute(
-                """
-                INSERT INTO state (id, current_hold, base_qqq_price, base_goog_price, is_waiting_trade, last_notify_time, last_daily_chart_date)
-                VALUES (1, ?, ?, ?, 0, 0, '')
-            """,
-                (str(last_cfg["current_hold"]), float(last_cfg["base_qqq_price"]), float(last_cfg["base_goog_price"])),
-            )
-        else:
-            c.execute(
-                """
-                INSERT INTO state (id, current_hold, base_qqq_price, base_goog_price, is_waiting_trade, last_notify_time, last_daily_chart_date)
-                VALUES (1, 'GOOG', 297.03, 348.00, 0, 0, '')
-            """
-            )
-            c.execute(
-                """
-                INSERT INTO trade_history (trade_date, action, qqq_price, goog_price, shares_held)
-                VALUES ('2026-06-15', 'BUY_GOOG', 297.03, 348.00, 85.35172)
-            """
-            )
-        conn.commit()
-    conn.close()
-
-
-def get_state():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute(
-        "SELECT current_hold, base_qqq_price, base_goog_price,"
-        " is_waiting_trade, last_notify_time, last_daily_chart_date FROM state WHERE id=1"
-    )
-    row = c.fetchone()
-    conn.close()
-    return {
-        "hold": row[0],
-        "base_qqq": row[1],
-        "base_goog": row[2],
-        "is_waiting": row[3],
-        "last_notify_time": row[4],
-        "last_daily_chart_date": row[5] if len(row) > 5 and row[5] else "",
-    }
-
-
-def update_notify_status(is_waiting, notify_time):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute(
-        """
-        UPDATE state 
-        SET is_waiting_trade = ?, last_notify_time = ?
-        WHERE id = 1
-    """,
-        (is_waiting, notify_time),
-    )
-    conn.commit()
-    conn.close()
-
-
-def update_daily_chart_date(today_str):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute(
-        """
-        UPDATE state 
-        SET last_daily_chart_date = ?
-        WHERE id = 1
-    """,
-        (today_str,),
-    )
-    conn.commit()
-    conn.close()
-
-
-# ==========================================
-# 3. 雙平台訊息發送功能 (TG + LINE)
+# 2. 雙平台訊息發送功能 (TG + LINE)
 # ==========================================
 def send_telegram_msg(text):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -204,16 +67,10 @@ def send_dual_notify(text):
 
 
 # ==========================================
-# 4. 繪製資產走勢圖
+# 3. 繪製資產走勢圖 (直接讀取 config.csv)
 # ==========================================
-def generate_chart(is_triggered=False, diff_pct=0.0):
-    conn = sqlite3.connect(DB_FILE)
-    trades_df = pd.read_sql_query(
-        "SELECT * FROM trade_history ORDER BY trade_date ASC", conn
-    )
-    conn.close()
-
-    start_date = trades_df["trade_date"].iloc[0]
+def generate_chart(df_cfg, is_triggered=False, diff_pct=0.0):
+    start_date = str(df_cfg["trade_date"].iloc[0])
     df = yf.download(["QQQM", "GOOG"], start=start_date, auto_adjust=True)[
         "Close"
     ].dropna()
@@ -222,28 +79,28 @@ def generate_chart(is_triggered=False, diff_pct=0.0):
     trade_dates = []
 
     current_idx = 0
-    init_shares = trades_df["shares_held"].iloc[0]
-    init_goog_price = trades_df["goog_price"].iloc[0]
-    init_qqq_price = trades_df["qqq_price"].iloc[0]
+    init_shares = float(df_cfg["shares_held"].iloc[0])
+    init_goog_price = float(df_cfg["base_goog_price"].iloc[0])
+    init_qqq_price = float(df_cfg["base_qqq_price"].iloc[0])
 
     init_cap = init_shares * init_goog_price
 
     current_shares = init_shares
     current_hold = (
-        "GOOG" if "GOOG" in trades_df["action"].iloc[0] else "QQQM"
+        "GOOG" if "GOOG" in str(df_cfg["action"].iloc[0]) else "QQQM"
     )
 
     for date, row in df.iterrows():
         date_str = date.strftime("%Y-%m-%d")
 
         if (
-            current_idx + 1 < len(trades_df)
-            and trades_df["trade_date"].iloc[current_idx + 1] <= date_str
+            current_idx + 1 < len(df_cfg)
+            and str(df_cfg["trade_date"].iloc[current_idx + 1]) <= date_str
         ):
             current_idx += 1
-            event = trades_df.iloc[current_idx]
-            current_shares = event["shares_held"]
-            current_hold = "GOOG" if "GOOG" in event["action"] else "QQQM"
+            event = df_cfg.iloc[current_idx]
+            current_shares = float(event["shares_held"])
+            current_hold = "GOOG" if "GOOG" in str(event["action"]) else "QQQM"
             trade_dates.append(date)
 
         p_qqq = row["QQQM"]
@@ -345,30 +202,29 @@ def generate_chart(is_triggered=False, diff_pct=0.0):
 
 
 # ==========================================
-# 5. 盤中監控邏輯
+# 4. 核心檢測邏輯
 # ==========================================
-def check_intraday_signal(is_manual=False):
-    state = get_state()
-    now_ts = time.time()
-    today_str = pd.Timestamp.now(tz="Asia/Taipei").strftime("%Y-%m-%d")
+def run_monitor(force_report=False):
+    if not os.path.exists(CONFIG_FILE):
+        print(f"❌ 找不到 {CONFIG_FILE}，請確保專案根目錄有此檔案。")
+        return
 
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute(
-        "SELECT shares_held FROM trade_history ORDER BY id DESC LIMIT 1"
-    )
-    current_shares = c.fetchone()[0]
-    conn.close()
+    df_cfg = pd.read_csv(CONFIG_FILE)
+    last_cfg = df_cfg.iloc[-1].to_dict()
+
+    curr_hold = str(last_cfg["current_hold"]).strip().upper()
+    base_qqq = float(last_cfg["base_qqq_price"])
+    base_goog = float(last_cfg["base_goog_price"])
+    current_shares = float(last_cfg["shares_held"])
 
     tickers = yf.Tickers("QQQM GOOG")
     p_qqq = float(tickers.tickers["QQQM"].fast_info["last_price"])
     p_goog = float(tickers.tickers["GOOG"].fast_info["last_price"])
 
-    ret_qqq = (p_qqq - state["base_qqq"]) / state["base_qqq"]
-    ret_goog = (p_goog - state["base_goog"]) / state["base_goog"]
+    ret_qqq = (p_qqq - base_qqq) / base_qqq
+    ret_goog = (p_goog - base_goog) / base_goog
     diff = ret_qqq - ret_goog
 
-    curr_hold = state["hold"]
     target_hold = "GOOG" if curr_hold == "QQQM" else "QQQM"
     triggered = False
 
@@ -383,29 +239,11 @@ def check_intraday_signal(is_manual=False):
     else:
         diff_pct = (diff if curr_hold == "QQQM" else -diff) * 100
 
-    # 情境 A：等待轉單狀態
-    if state["is_waiting"] == 1:
-        if now_ts - state["last_notify_time"] >= 3600 or is_manual:
-            est_cash = current_shares * (p_qqq if curr_hold == "QQQM" else p_goog)
-            est_buy_shares = int(est_cash // (p_goog if curr_hold == "QQQM" else p_qqq))
+    now_taipei = pd.Timestamp.now(tz="Asia/Taipei")
+    is_morning_report_time = (now_taipei.hour == 9)
 
-            msg = f"⏳ *【轉單催促提醒】*\n\n"
-            msg += f"尚未收到轉單回報。當前相對價差：`{diff_pct:.2f}%`。\n\n"
-            msg += f"📋 *請確認是否已完成 Firstrade 交易：*\n"
-            msg += f"1. **賣出 {curr_hold}**：`{current_shares}` 股\n"
-            msg += f"2. **買入 {target_hold}**：預估 `{est_buy_shares}` 股\n\n"
-            msg += f"-----------------------------------\n"
-            msg += f"💡 *完成交易後，請至 GitHub 的 `config.csv` 最下方新增一列紀錄，並刪除 `strategy_data.db`。*"
-
-            send_dual_notify(msg)
-            update_notify_status(1, now_ts)
-
-            chart_path = generate_chart(is_triggered=True, diff_pct=diff_pct)
-            send_telegram_photo(chart_path)
-        return
-
-    # 情境 B：首次觸發轉單門檻 (7%)
-    if triggered and state["is_waiting"] == 0:
+    # 情境 A：觸發 7% 門檻 (盤中每 15 分鐘通知)
+    if triggered:
         est_cash = current_shares * sell_price
         est_buy_shares = int(est_cash // buy_price)
 
@@ -418,45 +256,36 @@ def check_intraday_signal(is_manual=False):
         msg += f"2. **買入 {target_hold}**：預估可買入 `{est_buy_shares}` 股\n"
         msg += f"*(⚠️ 注意：請僅操作上述股數，勿動到其他長期持有的部位)*\n\n"
         msg += f"-----------------------------------\n"
-        msg += f"💡 *完成交易後，請至 GitHub 的 `config.csv` 最下方新增一列紀錄，並刪除 `strategy_data.db`。*"
+        msg += f"💡 *完成交易後，請至 GitHub 的 `config.csv` 最下方新增一列轉單紀錄。*"
 
         send_dual_notify(msg)
-        update_notify_status(1, now_ts)
-
-        chart_path = generate_chart(is_triggered=True, diff_pct=diff_pct)
+        chart_path = generate_chart(df_cfg, is_triggered=True, diff_pct=diff_pct)
         send_telegram_photo(chart_path)
+        print("🚨 已發送 7% 轉單警報。")
         return
 
-    # 情境 C：未達 7% 門檻
-    if not triggered:
-        should_send_daily = state["last_daily_chart_date"] != today_str
+    # 情境 B：未達門檻，但屬於早上 09:00 或手動執行 (發送日報)
+    if is_morning_report_time or force_report:
+        msg = f"ℹ️ *【每日策略狀態報告】*\n\n" if is_morning_report_time else f"ℹ️ *【手動檢查狀態報告】*\n\n"
+        msg += f"當前持股：`{curr_hold}` ({current_shares} 股)\n"
+        msg += f"QQQM 現價：`${p_qqq:.2f}` (基準價 ${base_qqq:.2f})\n"
+        msg += f"GOOG 現價：`${p_goog:.2f}` (基準價 ${base_goog:.2f})\n"
+        msg += f"相對價差變動：`{diff_pct:.2f}%` (門檻 7%)\n\n"
+        msg += f"📌 **結論：目前未達 7% 轉單門檻，維持原持股即可。**"
 
-        if is_manual or should_send_daily:
-            msg = f"ℹ️ *【每日策略狀態報告】*\n\n" if should_send_daily and not is_manual else f"ℹ️ *【手動檢查狀態報告】*\n\n"
-            msg += f"當前持股：`{curr_hold}` ({current_shares} 股)\n"
-            msg += f"QQQM 現價：`${p_qqq:.2f}` (基準價 ${state['base_qqq']:.2f})\n"
-            msg += f"GOOG 現價：`${p_goog:.2f}` (基準價 ${state['base_goog']:.2f})\n"
-            msg += f"相對價差變動：`{diff_pct:.2f}%` (門檻 7%)\n\n"
-            msg += f"📌 **結論：目前未達 7% 轉單門檻，維持原持股即可。**"
+        send_dual_notify(msg)
+        chart_path = generate_chart(df_cfg, is_triggered=False, diff_pct=diff_pct)
+        send_telegram_photo(chart_path)
+        print("ℹ️ 已發送每日策略報告。")
+        return
 
-            send_dual_notify(msg)
-
-            chart_path = generate_chart(is_triggered=False, diff_pct=diff_pct)
-            send_telegram_photo(chart_path)
-
-            update_daily_chart_date(today_str)
+    # 情境 C：盤中監控未達門檻 (靜默關閉，不打擾)
+    print(f"⏱️ 當前價差變動 {diff_pct:.2f}%，未達 7% 門檻，保持靜默。")
 
 
 # ==========================================
-# 6. 主程式 (批次執行模式)
+# 5. 主程式
 # ==========================================
 if __name__ == "__main__":
-    init_db()
-
-    if len(sys.argv) > 1 and sys.argv[1] == "--manual":
-        print("🔍 執行單次手動狀態檢查...")
-        check_intraday_signal(is_manual=True)
-    else:
-        print("⏱️ 執行 GitHub Actions 排程檢測...")
-        check_intraday_signal(is_manual=False)
-        print("✅ 檢測完成，程序正常退出。")
+    is_manual = len(sys.argv) > 1 and sys.argv[1] == "--manual"
+    run_monitor(force_report=is_manual)
