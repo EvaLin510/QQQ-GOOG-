@@ -55,6 +55,7 @@ def init_db():
 
     c.execute("SELECT COUNT(*) FROM state")
     if c.fetchone()[0] == 0:
+        # 請確保這裡的基準價格填入 2026-06-15 當天成交的 QQQ 與 GOOG 價格
         c.execute(
             """
             INSERT INTO state (id, current_hold, base_qqq_price, base_goog_price, is_waiting_trade, last_notify_time)
@@ -64,7 +65,7 @@ def init_db():
         c.execute(
             """
             INSERT INTO trade_history (trade_date, action, qqq_price, goog_price, shares_held)
-            VALUES ('2026-06-15', 'BUY_GOOG', 297.03, 348.00, 287.356)
+            VALUES ('2026-06-15', 'BUY_GOOG', 297.03, 348.00, 85.35172)
         """
         )
         conn.commit()
@@ -438,4 +439,3 @@ if __name__ == "__main__":
                     check_intraday_signal(is_manual=True)
             except Exception as e:
                 print(f"❌ 啟動 Bot 失敗: {e}")
-                
