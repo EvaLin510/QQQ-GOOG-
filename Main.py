@@ -202,7 +202,7 @@ def send_dual_notify(text):
 # ==========================================
 # 4. 繪製資產走勢圖
 # ==========================================
-def generate_chart():
+def generate_chart(is_triggered=False, diff_pct=0.0):
     conn = sqlite3.connect(DB_FILE)
     trades_df = pd.read_sql_query(
         "SELECT * FROM trade_history ORDER BY trade_date ASC", conn
@@ -251,7 +251,6 @@ def generate_chart():
     df["B&H_QQQM"] = (init_cap / init_qqq_price) * df["QQQM"]
     df["B&H_GOOG"] = (init_cap / init_goog_price) * df["GOOG"]
 
-    # 計算最新總金額與累積報酬率 %
     last_my_val = df["My_Portfolio"].iloc[-1]
     last_qqq_val = df["B&H_QQQM"].iloc[-1]
     last_goog_val = df["B&H_GOOG"].iloc[-1]
@@ -261,30 +260,42 @@ def generate_chart():
     ret_goog = ((last_goog_val - init_cap) / init_cap) * 100
 
     plt.figure(figsize=(10, 5))
-    plt.plot(
-        df.index,
-        df["My_Portfolio"],
-        label=f"My Live Strategy: ${last_my_val:,.0f} ({ret_my:+.2f}%)",
-        color="red",
-        linewidth=2,
-    )
-    plt.plot(
-        df.index,
-        df["B&H_QQQM"],
-        label=f"Buy & Hold QQQM: ${last_qqq_val:,.0f} ({ret_qqq:+.2f}%)",
-        color="blue",
-        linestyle="--",
-        alpha=0.6,
-    )
+
+    # 1. 畫 B&H GOOG（加粗且設為半透明，確保與紅線重合時仍可辨識）
     plt.plot(
         df.index,
         df["B&H_GOOG"],
         label=f"Buy & Hold GOOG: ${last_goog_val:,.0f} ({ret_goog:+.2f}%)",
-        color="green",
+        color="limegreen",
         linestyle="--",
-        alpha=0.6,
+        linewidth=2.8,
+        alpha=0.7,
+        zorder=1,
     )
 
+    # 2. 畫 B&H QQQM
+    plt.plot(
+        df.index,
+        df["B&H_QQQM"],
+        label=f"Buy & Hold QQQM: ${last_qqq_val:,.0f} ({ret_qqq:+.2f}%)",
+        color="royalblue",
+        linestyle="--",
+        linewidth=1.5,
+        alpha=0.7,
+        zorder=2,
+    )
+
+    # 3. 畫實盤策略 (紅實線)
+    plt.plot(
+        df.index,
+        df["My_Portfolio"],
+        label=f"My Live Strategy: ${last_my_val:,.0f} ({ret_my:+.2f}%)",
+        color="crimson",
+        linewidth=1.8,
+        zorder=3,
+    )
+
+    # 4. 歷史成交點 (黃點)
     for t_date in trade_dates:
         plt.scatter(
             t_date,
@@ -293,6 +304,32 @@ def generate_chart():
             edgecolors="black",
             s=100,
             zorder=5,
+        )
+
+    # 5. 當前觸發點標註 (紅色大星號 + 提示標籤)
+    latest_date = df.index[-1]
+    latest_val = df["My_Portfolio"].iloc[-1]
+
+    if is_triggered:
+        plt.scatter(
+            latest_date,
+            latest_val,
+            color="red",
+            marker="*",
+            s=250,
+            edgecolors="black",
+            zorder=6,
+        )
+        plt.annotate(
+            f"Trigger Signal!\n({diff_pct:+.2f}%)",
+            xy=(latest_date, latest_val),
+            xytext=(-50, 25),
+            textcoords="offset points",
+            arrowprops=dict(arrowstyle="->", color="red", lw=1.5),
+            fontsize=9,
+            fontweight="bold",
+            color="darkred",
+            bbox=dict(boxstyle="round,pad=0.3", fc="yellow", ec="red", alpha=0.9),
         )
 
     plt.title("Live Performance: Real-time Portfolio vs B&H (7% Threshold)")
@@ -306,6 +343,125 @@ def generate_chart():
     plt.savefig(chart_file)
     plt.close()
     return chart_file
+
+
+# ==========================================
+# 5. 盤中監控邏輯（更新發圖呼叫）
+# ==========================================
+def check_intraday_signal(is_manual=False):
+    state = get_state()
+    now_ts = time.time()
+    today_str = pd.Timestamp.now().strftime("%Y-%m-%d")
+
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute(
+        "SELECT shares_held FROM trade_history ORDER BY id DESC LIMIT 1"
+    )
+    current_shares = c.fetchone()[0]
+    conn.close()
+
+    tickers = yf.Tickers("QQQM GOOG")
+    p_qqq = float(tickers.tickers["QQQM"].fast_info["last_price"])
+    p_goog = float(tickers.tickers["GOOG"].fast_info["last_price"])
+
+    ret_qqq = (p_qqq - state["base_qqq"]) / state["base_qqq"]
+    ret_goog = (p_goog - state["base_goog"]) / state["base_goog"]
+    diff = ret_qqq - ret_goog
+
+    curr_hold = state["hold"]
+    target_hold = "GOOG" if curr_hold == "QQQM" else "QQQM"
+    triggered = False
+
+    if curr_hold == "QQQM" and diff > THRESHOLD:
+        triggered = True
+        diff_pct = diff * 100
+        sell_price, buy_price = p_qqq, p_goog
+    elif curr_hold == "GOOG" and -diff > THRESHOLD:
+        triggered = True
+        diff_pct = -diff * 100
+        sell_price, buy_price = p_goog, p_qqq
+    else:
+        diff_pct = (diff if curr_hold == "QQQM" else -diff) * 100
+
+    # 情境 A：等待轉單狀態
+    if state["is_waiting"] == 1:
+        if now_ts - state["last_notify_time"] >= 3600 or is_manual:
+            est_cash = current_shares * (p_qqq if curr_hold == "QQQM" else p_goog)
+            est_buy_shares = int(est_cash // (p_goog if curr_hold == "QQQM" else p_qqq))
+
+            msg = f"⏳ *【轉單催促提醒】*\n\n"
+            msg += f"尚未收到轉單回報。當前相對價差：`{diff_pct:.2f}%`。\n\n"
+            msg += f"📋 *請確認是否已完成 Firstrade 交易：*\n"
+            msg += f"1. **賣出 {curr_hold}**：`{current_shares}` 股\n"
+            msg += f"2. **買入 {target_hold}**：預估 `{est_buy_shares}` 股\n\n"
+            msg += f"-----------------------------------\n"
+            msg += f"💡 *完成後請至 Telegram 點擊指令複製並貼回更新：*\n"
+            msg += f"*(三個數字依序為：QQQM單價 / GOOG單價 / 買入股數)*\n\n"
+            msg += f"`/traded {target_hold} {p_qqq:.2f} {p_goog:.2f} {est_buy_shares}`"
+
+            send_dual_notify(msg)
+            update_notify_status(1, now_ts)
+
+            chart_path = generate_chart(is_triggered=True, diff_pct=diff_pct)
+            send_telegram_photo(chart_path)
+        return
+
+    # 情境 B：首次觸發轉單門檻 (7%)
+    if triggered and state["is_waiting"] == 0:
+        est_cash = current_shares * sell_price
+        est_buy_shares = int(est_cash // buy_price)
+
+        msg = f"🚨 *【盤中輪動觸發警報 (7% 門檻)】*\n\n"
+        msg += f"當前策略持股：`{curr_hold}`\n"
+        msg += f"相對價差漲幅：`{diff_pct:.2f}%` (門檻 7%)\n\n"
+        msg += f"-----------------------------------\n"
+        msg += f"📋 *Firstrade 專屬策略帳戶下單指示：*\n"
+        msg += f"1. **賣出 {curr_hold}**：指定賣出 `{current_shares}` 股 (預估收回 ${est_cash:,.2f})\n"
+        msg += f"2. **買入 {target_hold}**：預估可買入 `{est_buy_shares}` 股\n"
+        msg += f"*(⚠️ 注意：請僅操作上述股數，勿動到其他長期持有的部位)*\n\n"
+        msg += f"-----------------------------------\n"
+        msg += f"💡 *完成後請至 Telegram 點擊指令複製並貼回更新：*\n"
+        msg += f"*(三個數字依序為：QQQM單價 / GOOG單價 / 買入股數)*\n\n"
+        msg += f"`/traded {target_hold} {p_qqq:.2f} {p_goog:.2f} {est_buy_shares}`"
+
+        send_dual_notify(msg)
+        update_notify_status(1, now_ts)
+
+        chart_path = generate_chart(is_triggered=True, diff_pct=diff_pct)
+        send_telegram_photo(chart_path)
+        return
+
+    # 情境 C：未達 7% 門檻
+    if not triggered:
+        should_send_daily = state["last_daily_chart_date"] != today_str
+
+        if is_manual or should_send_daily:
+            msg = f"ℹ️ *【每日策略狀態報告】*\n\n" if should_send_daily and not is_manual else f"ℹ️ *【手動檢查狀態報告】*\n\n"
+            msg += f"當前持股：`{curr_hold}` ({current_shares} 股)\n"
+            msg += f"QQQM 現價：`${p_qqq:.2f}` (基準價 ${state['base_qqq']:.2f})\n"
+            msg += f"GOOG 現價：`${p_goog:.2f}` (基準價 ${state['base_goog']:.2f})\n"
+            msg += f"相對價差變動：`{diff_pct:.2f}%` (門檻 7%)\n\n"
+            msg += f"📌 **結論：目前未達 7% 轉單門檻，維持原持股即可。**"
+
+            send_dual_notify(msg)
+
+            chart_path = generate_chart(is_triggered=False, diff_pct=diff_pct)
+            send_telegram_photo(chart_path)
+
+            update_daily_chart_date(today_str)
+
+
+async def img_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await update.message.reply_text("📊 正在繪製最新實盤資產走勢圖...")
+        state = get_state()
+        chart_path = generate_chart(is_triggered=(state["is_waiting"] == 1))
+        await context.bot.send_photo(
+            chat_id=update.effective_chat.id, photo=open(chart_path, "rb")
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ 繪製圖片失敗: {e}")
 
 # ==========================================
 # 5. 盤中監控與手動/自動訊號回覆邏輯
