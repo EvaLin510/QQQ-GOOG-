@@ -409,7 +409,7 @@ async def traded_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 if __name__ == "__main__":
     init_db()
 
-    # 判定是否包含手動執行的參數 (例如 python Main.py --manual)
+    # 判定是否為 GitHub Actions 單次執行 (例如: python Main.py --manual)
     if len(sys.argv) > 1 and sys.argv[1] == "--manual":
         print("🔍 執行單次手動狀態檢查...")
         check_intraday_signal(is_manual=True)
@@ -417,10 +417,10 @@ if __name__ == "__main__":
         app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
         app.add_handler(CommandHandler("traded", traded_command))
 
-        job_queue = app.job_queue
-        job_queue.run_repeating(
-            lambda ctx: check_intraday_signal(is_manual=False), interval=900, first=10
-        )
+        if app.job_queue:
+            app.job_queue.run_repeating(
+                lambda ctx: check_intraday_signal(is_manual=False), interval=900, first=10
+            )
 
         print("🤖 盤中監控與 TG/LINE 雙推播系統已啟動...")
         app.run_polling()
