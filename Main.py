@@ -351,7 +351,7 @@ def generate_chart(is_triggered=False, diff_pct=0.0):
 def check_intraday_signal(is_manual=False):
     state = get_state()
     now_ts = time.time()
-    today_str = pd.Timestamp.now().strftime("%Y-%m-%d")
+    today_str = pd.Timestamp.now(tz="Asia/Taipei").strftime("%Y-%m-%d")
 
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -469,7 +469,7 @@ async def img_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def check_intraday_signal(is_manual=False):
     state = get_state()
     now_ts = time.time()
-    today_str = pd.Timestamp.now().strftime("%Y-%m-%d")
+    today_str = pd.Timestamp.now(tz="Asia/Taipei").strftime("%Y-%m-%d")
 
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -579,7 +579,7 @@ async def traded_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_qqq = float(context.args[1])
         new_goog = float(context.args[2])
         new_shares = float(context.args[3])
-        today_str = pd.Timestamp.now().strftime("%Y-%m-%d")
+        today_str = pd.Timestamp.now(tz="Asia/Taipei").strftime("%Y-%m-%d")
 
         update_state_after_trade(new_hold, new_qqq, new_goog, today_str)
 
