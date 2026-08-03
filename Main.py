@@ -2,6 +2,7 @@ import sys
 import os
 import sqlite3
 import time
+import subprocess
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -41,8 +42,7 @@ def init_db():
         )
     """
     )
-    
-    # 檢查並動態補充欄位 (相容舊資料庫)
+
     c.execute("PRAGMA table_info(state)")
     columns = [col[1] for col in c.fetchall()]
     if "last_daily_chart_date" not in columns:
@@ -149,6 +149,18 @@ def update_daily_chart_date(today_str):
     )
     conn.commit()
     conn.close()
+
+
+def push_db_to_github():
+    try:
+        subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
+        subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], check=True)
+        subprocess.run(["git", "add", DB_FILE], check=True)
+        subprocess.run(["git", "commit", "-m", "Auto-update strategy_data.db via Telegram /traded"], check=True)
+        subprocess.run(["git", "push"], check=True)
+        print("✅ 成功將最新的 DB 推送至 GitHub Repo！")
+    except Exception as e:
+        print(f"❌ 推送 DB 至 GitHub 失敗: {e}")
 
 
 # ==========================================
@@ -261,7 +273,6 @@ def generate_chart(is_triggered=False, diff_pct=0.0):
 
     plt.figure(figsize=(10, 5))
 
-    # 1. 畫 B&H GOOG（加粗且設為半透明，確保與紅線重合時仍可辨識）
     plt.plot(
         df.index,
         df["B&H_GOOG"],
@@ -273,7 +284,6 @@ def generate_chart(is_triggered=False, diff_pct=0.0):
         zorder=1,
     )
 
-    # 2. 畫 B&H QQQM
     plt.plot(
         df.index,
         df["B&H_QQQM"],
@@ -285,7 +295,6 @@ def generate_chart(is_triggered=False, diff_pct=0.0):
         zorder=2,
     )
 
-    # 3. 畫實盤策略 (紅實線)
     plt.plot(
         df.index,
         df["My_Portfolio"],
@@ -295,7 +304,6 @@ def generate_chart(is_triggered=False, diff_pct=0.0):
         zorder=3,
     )
 
-    # 4. 歷史成交點 (黃點)
     for t_date in trade_dates:
         plt.scatter(
             t_date,
@@ -306,7 +314,6 @@ def generate_chart(is_triggered=False, diff_pct=0.0):
             zorder=5,
         )
 
-    # 5. 當前觸發點標註 (紅色大星號 + 提示標籤)
     latest_date = df.index[-1]
     latest_val = df["My_Portfolio"].iloc[-1]
 
@@ -346,7 +353,7 @@ def generate_chart(is_triggered=False, diff_pct=0.0):
 
 
 # ==========================================
-# 5. 盤中監控邏輯（更新發圖呼叫）
+# 5. 盤中監控邏輯
 # ==========================================
 def check_intraday_signal(is_manual=False):
     state = get_state()
@@ -432,7 +439,7 @@ def check_intraday_signal(is_manual=False):
         send_telegram_photo(chart_path)
         return
 
-    # 情境 C：未達 7% 門檻
+    # 情境 C：未達 7% 門檻 (僅每日早上 09:00 或手動觸發時發送)
     if not triggered:
         should_send_daily = state["last_daily_chart_date"] != today_str
 
@@ -447,124 +454,6 @@ def check_intraday_signal(is_manual=False):
             send_dual_notify(msg)
 
             chart_path = generate_chart(is_triggered=False, diff_pct=diff_pct)
-            send_telegram_photo(chart_path)
-
-            update_daily_chart_date(today_str)
-
-
-async def img_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        await update.message.reply_text("📊 正在繪製最新實盤資產走勢圖...")
-        state = get_state()
-        chart_path = generate_chart(is_triggered=(state["is_waiting"] == 1))
-        await context.bot.send_photo(
-            chat_id=update.effective_chat.id, photo=open(chart_path, "rb")
-        )
-    except Exception as e:
-        await update.message.reply_text(f"❌ 繪製圖片失敗: {e}")
-
-# ==========================================
-# 5. 盤中監控與手動/自動訊號回覆邏輯
-# ==========================================
-def check_intraday_signal(is_manual=False):
-    state = get_state()
-    now_ts = time.time()
-    today_str = pd.Timestamp.now(tz="Asia/Taipei").strftime("%Y-%m-%d")
-
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute(
-        "SELECT shares_held FROM trade_history ORDER BY id DESC LIMIT 1"
-    )
-    current_shares = c.fetchone()[0]
-    conn.close()
-
-    tickers = yf.Tickers("QQQM GOOG")
-    p_qqq = float(tickers.tickers["QQQM"].fast_info["last_price"])
-    p_goog = float(tickers.tickers["GOOG"].fast_info["last_price"])
-
-    ret_qqq = (p_qqq - state["base_qqq"]) / state["base_qqq"]
-    ret_goog = (p_goog - state["base_goog"]) / state["base_goog"]
-    diff = ret_qqq - ret_goog
-
-    curr_hold = state["hold"]
-    target_hold = "GOOG" if curr_hold == "QQQM" else "QQQM"
-    triggered = False
-
-    if curr_hold == "QQQM" and diff > THRESHOLD:
-        triggered = True
-        diff_pct = diff * 100
-        sell_price, buy_price = p_qqq, p_goog
-    elif curr_hold == "GOOG" and -diff > THRESHOLD:
-        triggered = True
-        diff_pct = -diff * 100
-        sell_price, buy_price = p_goog, p_qqq
-    else:
-        diff_pct = (diff if curr_hold == "QQQM" else -diff) * 100
-
-    # 情境 A：等待轉單狀態
-    if state["is_waiting"] == 1:
-        if now_ts - state["last_notify_time"] >= 3600 or is_manual:
-            est_cash = current_shares * (p_qqq if curr_hold == "QQQM" else p_goog)
-            est_buy_shares = int(est_cash // (p_goog if curr_hold == "QQQM" else p_qqq))
-
-            msg = f"⏳ *【轉單催促提醒】*\n\n"
-            msg += f"尚未收到轉單回報。當前相對價差：`{diff_pct:.2f}%`。\n\n"
-            msg += f"📋 *請確認是否已完成 Firstrade 交易：*\n"
-            msg += f"1. **賣出 {curr_hold}**：`{current_shares}` 股\n"
-            msg += f"2. **買入 {target_hold}**：預估 `{est_buy_shares}` 股\n\n"
-            msg += f"-----------------------------------\n"
-            msg += f"💡 *完成後請至 Telegram 點擊指令複製並貼回更新：*\n"
-            msg += f"*(三個數字依序為：QQQM單價 / GOOG單價 / 買入股數)*\n\n"
-            msg += f"`/traded {target_hold} {p_qqq:.2f} {p_goog:.2f} {est_buy_shares}`"
-
-            send_dual_notify(msg)
-            update_notify_status(1, now_ts)
-
-            chart_path = generate_chart()
-            send_telegram_photo(chart_path)
-        return
-
-    # 情境 B：首次觸發轉單門檻 (7%)
-    if triggered and state["is_waiting"] == 0:
-        est_cash = current_shares * sell_price
-        est_buy_shares = int(est_cash // buy_price)
-
-        msg = f"🚨 *【盤中輪動觸發警報 (7% 門檻)】*\n\n"
-        msg += f"當前策略持股：`{curr_hold}`\n"
-        msg += f"相對價差漲幅：`{diff_pct:.2f}%` (門檻 7%)\n\n"
-        msg += f"-----------------------------------\n"
-        msg += f"📋 *Firstrade 專屬策略帳戶下單指示：*\n"
-        msg += f"1. **賣出 {curr_hold}**：指定賣出 `{current_shares}` 股 (預估收回 ${est_cash:,.2f})\n"
-        msg += f"2. **買入 {target_hold}**：預估可買入 `{est_buy_shares}` 股\n"
-        msg += f"*(⚠️ 注意：請僅操作上述股數，勿動到其他長期持有的部位)*\n\n"
-        msg += f"-----------------------------------\n"
-        msg += f"💡 *完成後請至 Telegram 點擊指令複製並貼回更新：*\n"
-        msg += f"*(三個數字依序為：QQQM單價 / GOOG單價 / 買入股數)*\n\n"
-        msg += f"`/traded {target_hold} {p_qqq:.2f} {p_goog:.2f} {est_buy_shares}`"
-
-        send_dual_notify(msg)
-        update_notify_status(1, now_ts)
-
-        chart_path = generate_chart()
-        send_telegram_photo(chart_path)
-        return
-
-    # 情境 C：未達 7% 門檻（手動檢查 OR 每日自動傳送一次圖表）
-    if not triggered:
-        should_send_daily = state["last_daily_chart_date"] != today_str
-
-        if is_manual or should_send_daily:
-            msg = f"ℹ️ *【每日策略狀態報告】*\n\n" if should_send_daily and not is_manual else f"ℹ️ *【手動檢查狀態報告】*\n\n"
-            msg += f"當前持股：`{curr_hold}` ({current_shares} 股)\n"
-            msg += f"QQQM 現價：`${p_qqq:.2f}` (基準價 ${state['base_qqq']:.2f})\n"
-            msg += f"GOOG 現價：`${p_goog:.2f}` (基準價 ${state['base_goog']:.2f})\n"
-            msg += f"相對價差變動：`{diff_pct:.2f}%` (門檻 7%)\n\n"
-            msg += f"📌 **結論：目前未達 7% 轉單門檻，維持原持股即可。**"
-
-            send_dual_notify(msg)
-
-            chart_path = generate_chart()
             send_telegram_photo(chart_path)
 
             update_daily_chart_date(today_str)
@@ -586,15 +475,16 @@ async def traded_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute(
-            "UPDATE trade_history SET shares_held = ? WHERE id = (SELECT"
-            " MAX(id) FROM trade_history)",
+            "UPDATE trade_history SET shares_held = ? WHERE id = (SELECT MAX(id) FROM trade_history)",
             (new_shares,),
         )
         conn.commit()
         conn.close()
 
+        push_db_to_github()
+
         success_msg = (
-            f"✅ *轉單完成！雙平台提醒已解除。*\n\n"
+            f"✅ *轉單完成！資料庫已同步至 GitHub。*\n\n"
             f"當前持股：`{new_hold}` ({new_shares} 股)\n"
             f"QQQM 新基準價：`${new_qqq:.2f}`\n"
             f"GOOG 新基準價：`${new_goog:.2f}`"
@@ -622,7 +512,8 @@ async def traded_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def img_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await update.message.reply_text("📊 正在繪製最新實盤資產走勢圖...")
-        chart_path = generate_chart()
+        state = get_state()
+        chart_path = generate_chart(is_triggered=(state["is_waiting"] == 1))
         await context.bot.send_photo(
             chat_id=update.effective_chat.id, photo=open(chart_path, "rb")
         )
