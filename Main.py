@@ -409,30 +409,35 @@ async def traded_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 if __name__ == "__main__":
     init_db()
 
-    # 1. 判斷是否為 GitHub Actions 的單次檢查 (python Main.py --manual)
+    # 1. GitHub Actions 單次執行模式 (python Main.py --manual)
     if len(sys.argv) > 1 and sys.argv[1] == "--manual":
         print("🔍 執行單次手動狀態檢查...")
         check_intraday_signal(is_manual=True)
 
-    # 2. 常駐監控模式 (僅在有提供 Telegram Token 且非單次執行時啟動)
-    elif TELEGRAM_TOKEN:
-        try:
-            app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-            app.add_handler(CommandHandler("traded", traded_command))
-
-            # 檢查是否具備 JobQueue 功能，若有才啟動輪巡
-            if getattr(app, "job_queue", None) is not None:
-                app.job_queue.run_repeating(
-                    lambda ctx: check_intraday_signal(is_manual=False),
-                    interval=900,
-                    first=10,
-                )
-                print("🤖 盤中監控與 TG/LINE 雙推播系統已啟動...")
-                app.run_polling()
-            else:
-                print("⚠️ 提示: 當前 python-telegram-bot 未啟用 job-queue 模組，僅提供單次檢查功能。")
-        except Exception as e:
-            print(f"❌ Telegram Bot 啟動失敗: {e}")
+    # 2. 常駐監控模式 (供 local 或 24H 伺服器使用)
     else:
-        print("⚠️ 未設定 TELEGRAM_TOKEN，僅執行單次檢查。")
-        check_intraday_signal(is_manual=True)
+        if not TELEGRAM_TOKEN:
+            print("⚠️ 未偵測到 TELEGRAM_TOKEN，改執行單次檢查...")
+            check_intraday_signal(is_manual=True)
+        else:
+            try:
+                app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+                app.add_handler(CommandHandler("traded", traded_command))
+
+                # 安全存取 job_queue，避免 NoneType 報錯
+                job_queue = getattr(app, "job_queue", None)
+                if job_queue is not None:
+                    job_queue.run_repeating(
+                        lambda ctx: check_intraday_signal(is_manual=False),
+                        interval=900,
+                        first=10,
+                    )
+                    print("🤖 盤中監控與 TG/LINE 雙推播系統已啟動...")
+                    app.run_polling()
+                else:
+                    print("⚠️ 未載入 JobQueue，執行單次檢查後結束...")
+                    check_intraday_signal(is_manual=True)
+            except Exception as e:
+                print(f"❌ 啟動 Bot 失敗: {e}")git add .
+git commit -m "Fix requirements quote and bypass job_queue on manual run"
+git push origin main
