@@ -132,6 +132,7 @@ def update_notify_status(is_waiting, notify_time):
 # ==========================================
 def send_telegram_msg(text):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️ 未設定 TELEGRAM_TOKEN 或 TELEGRAM_CHAT_ID")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
@@ -139,11 +140,13 @@ def send_telegram_msg(text):
         "text": text,
         "parse_mode": "Markdown",
     }
-    requests.post(url, json=payload)
+    res = requests.post(url, json=payload)
+    print(f"Telegram API 響應狀態: {res.status_code}")
 
 
 def send_line_msg(text):
     if not LINE_ACCESS_TOKEN or not LINE_USER_ID:
+        print("⚠️ 未設定 LINE_ACCESS_TOKEN 或 LINE_USER_ID")
         return
     clean_text = (
         text.replace("*", "").replace("`", "").replace("-------------------", "----------------")
@@ -157,7 +160,8 @@ def send_line_msg(text):
         "to": LINE_USER_ID,
         "messages": [{"type": "text", "text": clean_text}],
     }
-    requests.post(url, headers=headers, json=payload)
+    res = requests.post(url, headers=headers, json=payload)
+    print(f"LINE API 響應狀態: {res.status_code}")
 
 
 def send_dual_notify(text):
@@ -176,7 +180,7 @@ def generate_chart():
     conn.close()
 
     start_date = trades_df["trade_date"].iloc[0]
-    df = yf.download(["QQQ", "GOOG"], start=start_date, auto_adjust=True)[
+    df = yf.download(["QQQM", "GOOG"], start=start_date, auto_adjust=True)[
         "Close"
     ].dropna()
 
@@ -186,7 +190,7 @@ def generate_chart():
     current_idx = 0
     current_shares = trades_df["shares_held"].iloc[0]
     current_hold = (
-        "GOOG" if "GOOG" in trades_df["action"].iloc[0] else "QQQ"
+        "GOOG" if "GOOG" in trades_df["action"].iloc[0] else "QQQM"
     )
 
     for date, row in df.iterrows():
@@ -199,19 +203,19 @@ def generate_chart():
             current_idx += 1
             event = trades_df.iloc[current_idx]
             current_shares = event["shares_held"]
-            current_hold = "GOOG" if "GOOG" in event["action"] else "QQQ"
+            current_hold = "GOOG" if "GOOG" in event["action"] else "QQQM"
             trade_dates.append(date)
 
-        p_qqq = row["QQQ"]
+        p_qqq = row["QQQM"]
         p_goog = row["GOOG"]
         val = current_shares * (p_goog if current_hold == "GOOG" else p_qqq)
         portfolio_values.append(val)
 
     df["My_Portfolio"] = portfolio_values
     init_cap = 100000.0
-    df["B&H_QQQ"] = (
+    df["B&H_QQQM"] = (
         init_cap / trades_df["qqq_price"].iloc[0]
-    ) * df["QQQ"]
+    ) * df["QQQM"]
     df["B&H_GOOG"] = (
         init_cap / trades_df["goog_price"].iloc[0]
     ) * df["GOOG"]
@@ -226,8 +230,8 @@ def generate_chart():
     )
     plt.plot(
         df.index,
-        df["B&H_QQQ"],
-        label="Buy & Hold QQQ",
+        df["B&H_QQQM"],
+        label="Buy & Hold QQQM",
         color="blue",
         linestyle="--",
         alpha=0.5,
@@ -279,8 +283,8 @@ def check_intraday_signal(is_manual=False):
     current_shares = c.fetchone()[0]
     conn.close()
 
-    tickers = yf.Tickers("QQQ GOOG")
-    p_qqq = float(tickers.tickers["QQQ"].fast_info["last_price"])
+    tickers = yf.Tickers("QQQM GOOG")
+    p_qqq = float(tickers.tickers["QQQM"].fast_info["last_price"])
     p_goog = float(tickers.tickers["GOOG"].fast_info["last_price"])
 
     ret_qqq = (p_qqq - state["base_qqq"]) / state["base_qqq"]
@@ -288,10 +292,10 @@ def check_intraday_signal(is_manual=False):
     diff = ret_qqq - ret_goog
 
     curr_hold = state["hold"]
-    target_hold = "GOOG" if curr_hold == "QQQ" else "QQQ"
+    target_hold = "GOOG" if curr_hold == "QQQM" else "QQQM"
     triggered = False
 
-    if curr_hold == "QQQ" and diff > THRESHOLD:
+    if curr_hold == "QQQM" and diff > THRESHOLD:
         triggered = True
         diff_pct = diff * 100
         sell_price, buy_price = p_qqq, p_goog
@@ -300,13 +304,15 @@ def check_intraday_signal(is_manual=False):
         diff_pct = -diff * 100
         sell_price, buy_price = p_goog, p_qqq
     else:
-        diff_pct = (diff if curr_hold == "QQQ" else -diff) * 100
+        diff_pct = (diff if curr_hold == "QQQM" else -diff) * 100
 
-    # 情境 A：等待轉單狀態（滿 1 小時發送催促通知）
+    print(f"DEBUG: QQQM 現價={p_qqq}, GOOG 現價={p_goog}, 價差變動={diff_pct:.2f}%, 觸發狀態={triggered}")
+
+    # 情境 A：等待轉單狀態
     if state["is_waiting"] == 1:
         if now_ts - state["last_notify_time"] >= 3600 or is_manual:
-            est_cash = current_shares * (p_qqq if curr_hold == "QQQ" else p_goog)
-            est_buy_shares = int(est_cash // (p_goog if curr_hold == "QQQ" else p_qqq))
+            est_cash = current_shares * (p_qqq if curr_hold == "QQQM" else p_goog)
+            est_buy_shares = int(est_cash // (p_goog if curr_hold == "QQQM" else p_qqq))
 
             msg = f"⏳ *【轉單催促提醒】*\n\n"
             msg += f"尚未收到轉單回報。當前相對價差：`{diff_pct:.2f}%`。\n\n"
@@ -342,11 +348,11 @@ def check_intraday_signal(is_manual=False):
         update_notify_status(1, now_ts)
         return
 
-    # 情境 C：手動觸發但未達轉單門檻 -> 主動回報現價與價差
+    # 情境 C：手動觸發但未達轉單門檻
     if is_manual and not triggered:
         msg = f"ℹ️ *【手動檢查狀態報告】*\n\n"
         msg += f"當前持股：`{curr_hold}` ({current_shares} 股)\n"
-        msg += f"QQQ 現價：`${p_qqq:.2f}` (基準價 ${state['base_qqq']:.2f})\n"
+        msg += f"QQQM 現價：`${p_qqq:.2f}` (基準價 ${state['base_qqq']:.2f})\n"
         msg += f"GOOG 現價：`${p_goog:.2f}` (基準價 ${state['base_goog']:.2f})\n"
         msg += f"相對價差變動：`{diff_pct:.2f}%` (門檻 7%)\n\n"
         msg += f"📌 **結論：目前未達 7% 轉單門檻，維持原持股即可。**"
@@ -380,7 +386,7 @@ async def traded_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         success_msg = (
             f"✅ *轉單完成！雙平台提醒已解除。*\n\n"
             f"當前持股：`{new_hold}` ({new_shares} 股)\n"
-            f"QQQ 新基準價：`${new_qqq:.2f}`\n"
+            f"QQQM 新基準價：`${new_qqq:.2f}`\n"
             f"GOOG 新基準價：`${new_goog:.2f}`"
         )
 
@@ -398,8 +404,8 @@ async def traded_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(
             "❌ *格式錯誤！* 請參考預設格式複製貼上：\n"
-            "`/traded [標的 QQQ/GOOG] [QQQ成交價] [GOOG成交價] [買入股數]`\n\n"
-            "範例：`/traded QQQ 283.29 356.65 353`"
+            "`/traded [標的 QQQM/GOOG] [QQQM成交價] [GOOG成交價] [買入股數]`\n\n"
+            "範例：`/traded QQQM 283.29 356.65 353`"
         )
 
 
@@ -409,12 +415,9 @@ async def traded_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 if __name__ == "__main__":
     init_db()
 
-    # 1. GitHub Actions 單次執行模式 (python Main.py --manual)
     if len(sys.argv) > 1 and sys.argv[1] == "--manual":
         print("🔍 執行單次手動狀態檢查...")
         check_intraday_signal(is_manual=True)
-
-    # 2. 常駐監控模式
     else:
         if not TELEGRAM_TOKEN:
             print("⚠️ 未設定 TELEGRAM_TOKEN，改執行單次檢查...")
@@ -435,6 +438,6 @@ if __name__ == "__main__":
                     app.run_polling()
                 else:
                     print("⚠️ 未載入 JobQueue，改執行單次檢查...")
-                    check_intraday_signal(is_manual=True)
+                    check_intraday_signal(is_manual=False)
             except Exception as e:
                 print(f"❌ 啟動 Bot 失敗: {e}")
