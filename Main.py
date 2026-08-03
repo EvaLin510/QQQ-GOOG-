@@ -2,14 +2,11 @@ import sys
 import os
 import sqlite3
 import time
-import subprocess
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # ==========================================
 # 1. 環境變數與設定
@@ -25,7 +22,7 @@ THRESHOLD = 0.07  # 7% 門檻
 
 
 # ==========================================
-# 2. 資料庫初始化與讀寫 (SQLite + config.csv)
+# 2. 資料庫初始化與讀寫 (SQLite + config.csv 多列歷史紀錄)
 # ==========================================
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -66,37 +63,45 @@ def init_db():
     if c.fetchone()[0] == 0:
         if os.path.exists(CONFIG_FILE):
             df_cfg = pd.read_csv(CONFIG_FILE)
-            cfg = df_cfg.iloc[0].to_dict()
+            
+            # 1. 匯入 config.csv 內所有的歷史轉單紀錄
+            for _, row in df_cfg.iterrows():
+                c.execute(
+                    """
+                    INSERT INTO trade_history (trade_date, action, qqq_price, goog_price, shares_held)
+                    VALUES (?, ?, ?, ?, ?)
+                """,
+                    (
+                        str(row["trade_date"]),
+                        str(row["action"]),
+                        float(row["base_qqq_price"]),
+                        float(row["base_goog_price"]),
+                        float(row["shares_held"]),
+                    ),
+                )
+            
+            # 2. 讀取最新一筆（最後一行）寫入當前 state
+            last_cfg = df_cfg.iloc[-1].to_dict()
+            c.execute(
+                """
+                INSERT INTO state (id, current_hold, base_qqq_price, base_goog_price, is_waiting_trade, last_notify_time, last_daily_chart_date)
+                VALUES (1, ?, ?, ?, 0, 0, '')
+            """,
+                (str(last_cfg["current_hold"]), float(last_cfg["base_qqq_price"]), float(last_cfg["base_goog_price"])),
+            )
         else:
-            cfg = {
-                "current_hold": "GOOG",
-                "base_qqq_price": 297.03,
-                "base_goog_price": 348.00,
-                "shares_held": 85.35172,
-                "trade_date": "2026-06-15",
-                "action": "BUY_GOOG",
-            }
-
-        c.execute(
+            c.execute(
+                """
+                INSERT INTO state (id, current_hold, base_qqq_price, base_goog_price, is_waiting_trade, last_notify_time, last_daily_chart_date)
+                VALUES (1, 'GOOG', 297.03, 348.00, 0, 0, '')
             """
-            INSERT INTO state (id, current_hold, base_qqq_price, base_goog_price, is_waiting_trade, last_notify_time, last_daily_chart_date)
-            VALUES (1, ?, ?, ?, 0, 0, '')
-        """,
-            (str(cfg["current_hold"]), float(cfg["base_qqq_price"]), float(cfg["base_goog_price"])),
-        )
-        c.execute(
+            )
+            c.execute(
+                """
+                INSERT INTO trade_history (trade_date, action, qqq_price, goog_price, shares_held)
+                VALUES ('2026-06-15', 'BUY_GOOG', 297.03, 348.00, 85.35172)
             """
-            INSERT INTO trade_history (trade_date, action, qqq_price, goog_price, shares_held)
-            VALUES (?, ?, ?, ?, ?)
-        """,
-            (
-                str(cfg["trade_date"]),
-                str(cfg["action"]),
-                float(cfg["base_qqq_price"]),
-                float(cfg["base_goog_price"]),
-                float(cfg["shares_held"]),
-            ),
-        )
+            )
         conn.commit()
     conn.close()
 
@@ -118,29 +123,6 @@ def get_state():
         "last_notify_time": row[4],
         "last_daily_chart_date": row[5] if len(row) > 5 and row[5] else "",
     }
-
-
-def update_state_after_trade(new_hold, new_qqq, new_goog, today_str):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute(
-        """
-        UPDATE state 
-        SET current_hold = ?, base_qqq_price = ?, base_goog_price = ?, is_waiting_trade = 0, last_notify_time = 0
-        WHERE id = 1
-    """,
-        (new_hold, new_qqq, new_goog),
-    )
-
-    c.execute(
-        """
-        INSERT INTO trade_history (trade_date, action, qqq_price, goog_price, shares_held)
-        VALUES (?, ?, ?, ?, ?)
-    """,
-        (today_str, f"BUY_{new_hold}", new_qqq, new_goog, 0),
-    )
-    conn.commit()
-    conn.close()
 
 
 def update_notify_status(is_waiting, notify_time):
@@ -171,18 +153,6 @@ def update_daily_chart_date(today_str):
     )
     conn.commit()
     conn.close()
-
-
-def push_db_to_github():
-    try:
-        subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
-        subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], check=True)
-        subprocess.run(["git", "add", DB_FILE], check=True)
-        subprocess.run(["git", "commit", "-m", "Auto-update strategy_data.db via Telegram /traded"], check=True)
-        subprocess.run(["git", "push"], check=True)
-        print("✅ 成功將最新的 DB 推送至 GitHub Repo！")
-    except Exception as e:
-        print(f"❌ 推送 DB 至 GitHub 失敗: {e}")
 
 
 # ==========================================
@@ -425,9 +395,7 @@ def check_intraday_signal(is_manual=False):
             msg += f"1. **賣出 {curr_hold}**：`{current_shares}` 股\n"
             msg += f"2. **買入 {target_hold}**：預估 `{est_buy_shares}` 股\n\n"
             msg += f"-----------------------------------\n"
-            msg += f"💡 *完成後請至 Telegram 點擊指令複製並貼回更新：*\n"
-            msg += f"*(三個數字依序為：QQQM單價 / GOOG單價 / 買入股數)*\n\n"
-            msg += f"`/traded {target_hold} {p_qqq:.2f} {p_goog:.2f} {est_buy_shares}`"
+            msg += f"💡 *完成交易後，請至 GitHub 的 `config.csv` 最下方新增一列紀錄，並刪除 `strategy_data.db`。*"
 
             send_dual_notify(msg)
             update_notify_status(1, now_ts)
@@ -450,9 +418,7 @@ def check_intraday_signal(is_manual=False):
         msg += f"2. **買入 {target_hold}**：預估可買入 `{est_buy_shares}` 股\n"
         msg += f"*(⚠️ 注意：請僅操作上述股數，勿動到其他長期持有的部位)*\n\n"
         msg += f"-----------------------------------\n"
-        msg += f"💡 *完成後請至 Telegram 點擊指令複製並貼回更新：*\n"
-        msg += f"*(三個數字依序為：QQQM單價 / GOOG單價 / 買入股數)*\n\n"
-        msg += f"`/traded {target_hold} {p_qqq:.2f} {p_goog:.2f} {est_buy_shares}`"
+        msg += f"💡 *完成交易後，請至 GitHub 的 `config.csv` 最下方新增一列紀錄，並刪除 `strategy_data.db`。*"
 
         send_dual_notify(msg)
         update_notify_status(1, now_ts)
@@ -461,7 +427,7 @@ def check_intraday_signal(is_manual=False):
         send_telegram_photo(chart_path)
         return
 
-    # 情境 C：未達 7% 門檻 (僅每日早上 09:00 或手動觸發時發送)
+    # 情境 C：未達 7% 門檻
     if not triggered:
         should_send_daily = state["last_daily_chart_date"] != today_str
 
@@ -482,74 +448,8 @@ def check_intraday_signal(is_manual=False):
 
 
 # ==========================================
-# 6. Telegram 指令處理
+# 6. 主程式 (批次執行模式)
 # ==========================================
-async def traded_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        new_hold = context.args[0].upper()
-        new_qqq = float(context.args[1])
-        new_goog = float(context.args[2])
-        new_shares = float(context.args[3])
-        today_str = pd.Timestamp.now(tz="Asia/Taipei").strftime("%Y-%m-%d")
-
-        update_state_after_trade(new_hold, new_qqq, new_goog, today_str)
-
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute(
-            "UPDATE trade_history SET shares_held = ? WHERE id = (SELECT MAX(id) FROM trade_history)",
-            (new_shares,),
-        )
-        conn.commit()
-        conn.close()
-
-        push_db_to_github()
-
-        success_msg = (
-            f"✅ *轉單完成！資料庫已同步至 GitHub。*\n\n"
-            f"當前持股：`{new_hold}` ({new_shares} 股)\n"
-            f"QQQM 新基準價：`${new_qqq:.2f}`\n"
-            f"GOOG 新基準價：`${new_goog:.2f}`"
-        )
-
-        send_line_msg(success_msg)
-
-        await update.message.reply_text(
-            f"{success_msg}\n\n正在繪製最新實盤資產走勢圖..."
-        )
-
-        chart_path = generate_chart()
-        await context.bot.send_photo(
-            chat_id=update.effective_chat.id, photo=open(chart_path, "rb")
-        )
-
-    except Exception as e:
-        await update.message.reply_text(
-            "❌ *格式錯誤！* 請參考預設格式複製貼上：\n"
-            "`/traded [標的 QQQM/GOOG] [QQQM成交價] [GOOG成交價] [買入股數]`\n\n"
-            "範例：`/traded QQQM 283.29 356.65 353`"
-        )
-
-
-async def img_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        await update.message.reply_text("📊 正在繪製最新實盤資產走勢圖...")
-        state = get_state()
-        chart_path = generate_chart(is_triggered=(state["is_waiting"] == 1))
-        await context.bot.send_photo(
-            chat_id=update.effective_chat.id, photo=open(chart_path, "rb")
-        )
-    except Exception as e:
-        await update.message.reply_text(f"❌ 繪製圖片失敗: {e}")
-
-
-# ==========================================
-# 7. 主程式 (非同步 JobQueue)
-# ==========================================
-async def scheduled_check_job(context: ContextTypes.DEFAULT_TYPE):
-    check_intraday_signal(is_manual=False)
-
-
 if __name__ == "__main__":
     init_db()
 
@@ -557,26 +457,6 @@ if __name__ == "__main__":
         print("🔍 執行單次手動狀態檢查...")
         check_intraday_signal(is_manual=True)
     else:
-        if not TELEGRAM_TOKEN:
-            print("⚠️ 未設定 TELEGRAM_TOKEN，改執行單次檢查...")
-            check_intraday_signal(is_manual=True)
-        else:
-            try:
-                app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-                app.add_handler(CommandHandler("traded", traded_command))
-                app.add_handler(CommandHandler(["img", "IMG"], img_command))
-
-                job_q = getattr(app, "job_queue", None)
-                if job_q is not None:
-                    job_q.run_repeating(
-                        scheduled_check_job,
-                        interval=900,
-                        first=10,
-                    )
-                    print("🤖 盤中監控與 TG/LINE 雙推播系統已啟動...")
-                    app.run_polling()
-                else:
-                    print("⚠️ 未載入 JobQueue，改執行單次檢查...")
-                    check_intraday_signal(is_manual=False)
-            except Exception as e:
-                print(f"❌ 啟動 Bot 失敗: {e}")
+        print("⏱️ 執行 GitHub Actions 排程檢測...")
+        check_intraday_signal(is_manual=False)
+        print("✅ 檢測完成，程序正常退出。")
