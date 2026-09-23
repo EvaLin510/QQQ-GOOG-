@@ -194,7 +194,7 @@ def generate_chart(df_cfg, is_triggered=False, diff_pct=0.0):
     plt.grid(True, linestyle=":", alpha=0.6)
     plt.tight_layout()
 
-chart_file = "live_chart.png"
+    chart_file = "live_chart.png"
     plt.savefig(chart_file)
     plt.close()
     # 同時回傳各策略的最新報酬率 (%)
