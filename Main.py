@@ -86,9 +86,8 @@ def generate_chart(df_cfg, is_triggered=False, diff_pct=0.0):
     init_cap = init_shares * init_goog_price
 
     current_shares = init_shares
-    current_hold = (
-        "GOOG" if "GOOG" in str(df_cfg["action"].iloc[0]) else "QQQM"
-    )
+    # 改為直接讀取最後一行的 current_hold 欄位，確保前後邏輯一致
+    current_hold = str(df_cfg["current_hold"].iloc[-1]).strip().upper()
 
     for date, row in df.iterrows():
         date_str = date.strftime("%Y-%m-%d")
