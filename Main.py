@@ -194,10 +194,11 @@ def generate_chart(df_cfg, is_triggered=False, diff_pct=0.0):
     plt.grid(True, linestyle=":", alpha=0.6)
     plt.tight_layout()
 
-    chart_file = "live_chart.png"
+chart_file = "live_chart.png"
     plt.savefig(chart_file)
     plt.close()
-    return chart_file
+    # 同時回傳各策略的最新報酬率 (%)
+    return chart_file, ret_my, ret_qqq, ret_goog
 
 
 # ==========================================
@@ -264,16 +265,26 @@ def run_monitor(force_report=False):
         return
 
     # 情境 B：未達門檻，但屬於早上 09:00 或手動執行 (發送日報)
-    if is_morning_report_time or force_report:
+if is_morning_report_time or force_report:
+        # 先執行圖表產生並取得各項報酬率數據
+        chart_path, ret_my, ret_qqq, ret_goog = generate_chart(df_cfg, is_triggered=False, diff_pct=diff_pct)
+        
+        # 計算相對於 Buy & Hold QQQM 的落後/超前幅度
+        diff_vs_qqq = ret_my - ret_qqq
+        diff_vs_goog = ret_my - ret_goog
+
         msg = f"ℹ️ *【每日策略狀態報告】*\n\n" if is_morning_report_time else f"ℹ️ *【手動檢查狀態報告】*\n\n"
         msg += f"當前持股：`{curr_hold}` ({current_shares} 股)\n"
         msg += f"QQQM 現價：`${p_qqq:.2f}` (基準價 ${base_qqq:.2f})\n"
         msg += f"GOOG 現價：`${p_goog:.2f}` (基準價 ${base_goog:.2f})\n"
         msg += f"相對價差變動：`{diff_pct:.2f}%` (門檻 7%)\n\n"
-        msg += f"📌 **結論：目前未達 7% 轉單門檻，維持原持股即可。**"
+        msg += f"📊 *【目前累積績效比較】*\n"
+        msg += f"• 我的策略總報酬：`{ret_my:+.2f}%`\n"
+        msg += f"• B&H QQQM 報酬：`{ret_qqq:+.2f}%` (落後 `{diff_vs_qqq:+.2f}%`)\n"
+        msg += f"• B&H GOOG 報酬：`{ret_goog:+.2f}%` (落後 `{diff_vs_goog:+.2f}%`)\n\n"
+        msg += f"📌 **結論：目前未達 7% 門檻，維持原持股即可。**"
 
         send_dual_notify(msg)
-        chart_path = generate_chart(df_cfg, is_triggered=False, diff_pct=diff_pct)
         send_telegram_photo(chart_path)
         print("ℹ️ 已發送每日策略報告。")
         return
