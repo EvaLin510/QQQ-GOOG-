@@ -1,7 +1,13 @@
 # ==========================================
 # 4. 核心檢測邏輯
 # ==========================================
+import os
+
 def run_monitor(force_report=False):
+    # 若為 GitHub 手動觸發 (workflow_dispatch)，則強制發送報告
+    if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+        force_report = True
+
     if not os.path.exists(CONFIG_FILE):
         print(f"❌ 找不到 {CONFIG_FILE}，請確保專案根目錄有此檔案。")
         return
@@ -61,14 +67,15 @@ def run_monitor(force_report=False):
         print("🚨 已發送 7% 轉單警報。")
         return
 
-    # 情境 B：未達門檻，但屬於早上 09:00 或手動執行 (發送日報)
+    # 情境 B：未達門檻，但符合早上 09:00 定時報告或手動執行 (force_report)
     if is_morning_report_time or force_report:
         chart_path, ret_my, ret_qqq, ret_goog = generate_chart(df_cfg, is_triggered=False, diff_pct=diff_pct)
         
         diff_vs_qqq = ret_my - ret_qqq
         diff_vs_goog = ret_my - ret_goog
 
-        msg = f"ℹ️ *【每日策略狀態報告】*\n\n" if is_morning_report_time else f"ℹ️ *【手動檢查狀態報告】*\n\n"
+        report_title = "【每日策略狀態報告】" if is_morning_report_time else "【手動檢查狀態報告】"
+        msg = f"ℹ️ *{report_title}*\n\n"
         msg += f"當前持股：`{curr_hold}` ({current_shares} 股)\n"
         msg += f"QQQM 現價：`${p_qqq:.2f}` (基準價 ${base_qqq:.2f})\n"
         msg += f"GOOG 現價：`${p_goog:.2f}` (基準價 ${base_goog:.2f})\n"
@@ -81,8 +88,8 @@ def run_monitor(force_report=False):
 
         send_dual_notify(msg)
         send_telegram_photo(chart_path)
-        print("ℹ️ 已發送每日策略報告。")
+        print("ℹ️ 已發送狀態報告。")
         return
 
-    # 情境 C：盤中監控未達門檻 (靜默關閉，不打擾)
+    # 情境 C：盤中自動排程監控且未達門檻 (靜默關閉，不打擾)
     print(f"⏱️ 當前價差變動 {diff_pct:.2f}%，未達 7% 門檻，保持靜默。")
