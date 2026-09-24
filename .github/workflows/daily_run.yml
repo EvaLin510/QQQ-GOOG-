@@ -2,10 +2,17 @@ name: Strategy Intraday Monitor
 
 on:
   schedule:
-    # 1. 盤中監控：台灣時間 21:00 ~ 05:00 (每 15 分鐘檢查一次)
+    # 盤中監控：
+    # GitHub 使用 UTC
+    # 台灣時間 21:00 ~ 04:45
+    # 每 15 分鐘執行一次
     - cron: '*/15 13-20 * * 1-5'
-    # 2. 每日晨報：台灣時間早上 09:00 (每天執行一次)
+
+    # 每日晨報：
+    # UTC 01:00 = 台灣時間 09:00
     - cron: '0 1 * * *'
+
+  # GitHub Actions 手動執行
   workflow_dispatch:
 
 jobs:
@@ -14,10 +21,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
@@ -26,10 +33,34 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # ==========================================
+      # 顯示目前執行模式
+      # ==========================================
+      - name: Show execution mode
+        run: |
+          echo "GitHub Event: ${{ github.event_name }}"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Mode: MANUAL"
+          else
+            echo "Mode: SCHEDULED"
+          fi
+
+      # ==========================================
+      # 執行策略監控
+      # ==========================================
       - name: Run Main.py
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-        run: python Main.py
+
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "🧪 手動執行：python Main.py --manual"
+            python Main.py --manual
+          else
+            echo "⏰ 排程執行：python Main.py"
+            python Main.py
+          fi
