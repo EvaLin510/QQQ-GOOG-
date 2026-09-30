@@ -133,118 +133,81 @@ def send_photo(path):
 
 
 # ==========================================
-# Config
+# Config 讀取
 # ==========================================
 
 def load_config():
     if not os.path.exists(CONFIG_FILE):
-        raise FileNotFoundError(
-            f"找不到 {CONFIG_FILE}"
-        )
+        raise FileNotFoundError(f"找不到 {CONFIG_FILE}")
 
     df = pd.read_csv(CONFIG_FILE)
-
-    # 允許欄位相容 base_qqq_price 與 base_qqqm_price
-    if "base_qqqm_price" in df.columns and "base_qqq_price" not in df.columns:
-        df.rename(columns={"base_qqqm_price": "base_qqq_price"}, inplace=True)
 
     required = [
         "trade_date",
         "action",
+        "base_hold",
+        "base_hold_price",
         "current_hold",
-        "base_qqq_price",
-        "base_goog_price",
+        "current_hold_price",
         "shares_held"
     ]
 
-    missing = [
-        x for x in required
-        if x not in df.columns
-    ]
+    missing = [x for x in required if x not in df.columns]
 
     if missing:
-        raise ValueError(
-            "config.csv 缺少欄位："
-            + ", ".join(missing)
-        )
+        raise ValueError("config.csv 缺少欄位：" + ", ".join(missing))
 
     if df.empty:
-        raise ValueError(
-            "config.csv 是空的"
-        )
+        raise ValueError("config.csv 是空的")
 
     return df
 
 
 # ==========================================
-# 即時價格
+# 即時價格抓取
 # ==========================================
 
-def get_prices(hold):
-    # 依據目前持股判斷需要抓取 QQQM 還是 QQQ，對照檔固定為 GOOGL
-    qqq_ticker = "QQQ" if hold == "QQQ" else "QQQM"
-    tickers = yf.Tickers(f"{qqq_ticker} GOOGL")
+def get_prices(base_hold, current_hold):
+    tickers = yf.Tickers(f"{base_hold} {current_hold}")
 
-    p_qqq = float(tickers.tickers[qqq_ticker].fast_info["last_price"])
-    p_googl = float(tickers.tickers["GOOGL"].fast_info["last_price"])
+    p_base = float(tickers.tickers[base_hold].fast_info["last_price"])
+    p_current = float(tickers.tickers[current_hold].fast_info["last_price"])
 
-    if not np.isfinite(p_qqq) or not np.isfinite(p_googl):
-        raise ValueError(
-            f"無效價格：{qqq_ticker}={p_qqq}, GOOGL={p_googl}"
-        )
+    if not np.isfinite(p_base) or not np.isfinite(p_current):
+        raise ValueError(f"無效價格：{base_hold}={p_base}, {current_hold}={p_current}")
 
-    return qqq_ticker, p_qqq, p_googl
+    return p_base, p_current
 
 
 # ==========================================
-# 策略計算
+# 策略與績效計算
 # ==========================================
 
-def calculate(hold, shares, base_qqq, base_goog, qqq_ticker, p_qqq, p_googl):
+def calculate(base_hold, current_hold, shares, p_base_init, p_curr_init, p_base_now, p_curr_now):
 
-    ret_qqq = p_qqq / base_qqq - 1
-    ret_goog = p_googl / base_goog - 1
+    # 計算自基準點以來的各自報酬率
+    ret_base = p_base_now / p_base_init - 1
+    ret_curr = p_curr_now / p_curr_init - 1
 
-    diff = ret_qqq - ret_goog
+    # 計算基準標的相對目前持股的領先/落後幅度 (當 base 表現遠優於 current 時觸發換回)
+    diff = ret_base - ret_curr
 
-    hold = hold.upper().strip()
+    # 現有持股市值
+    current_val = shares * p_curr_now
 
-    if hold in ["QQQM", "QQQ"]:
-        strategy_diff = -diff
-        target = "GOOGL"
-        sell = p_qqq
-        buy = p_googl
-        
-        # 計算持股價值與換算機會成本
-        current_val = shares * p_qqq
-        hypo_val = (shares * base_qqq / base_goog) * p_googl
-        pnl_diff = current_val - hypo_val
+    # 若留在原本對照標的（base_hold）的市值
+    hypo_val = (shares * p_curr_init / p_base_init) * p_base_now
 
-    elif hold in ["GOOG", "GOOGL"]:
-        strategy_diff = diff
-        target = "QQQM" if hold == "GOOG" else "QQQ"  # 預設買回 QQQ 或 QQQM
-        sell = p_googl
-        buy = p_qqq
-        
-        # 持有 GOOGL 狀況下的機會成本計算
-        current_val = shares * p_googl
-        hypo_val = (shares * base_goog / base_qqq) * p_qqq
-        pnl_diff = current_val - hypo_val
-
-    else:
-        raise ValueError(
-            f"current_hold 無法辨識：{hold}"
-        )
+    # 機會成本損益
+    pnl_diff = current_val - hypo_val
 
     return {
-        "ret_qqq": ret_qqq,
-        "ret_goog": ret_goog,
-        "diff": diff,
-        "strategy_diff": strategy_diff,
-        "target": target,
-        "triggered": strategy_diff > THRESHOLD,
-        "sell": sell,
-        "buy": buy,
+        "ret_base": ret_base,
+        "ret_curr": ret_curr,
+        "strategy_diff": diff,
+        "triggered": diff > THRESHOLD,
+        "sell": p_curr_now,
+        "buy": p_base_now,
         "current_val": current_val,
         "hypo_val": hypo_val,
         "pnl_diff": pnl_diff
@@ -255,67 +218,52 @@ def calculate(hold, shares, base_qqq, base_goog, qqq_ticker, p_qqq, p_googl):
 # 每日 / 手動報告
 # ==========================================
 
-def build_report(
-    hold,
-    shares,
-    base_qqq,
-    base_goog,
-    qqq_ticker,
-    p_qqq,
-    p_googl,
-    s
-):
+def build_report(base_hold, current_hold, shares, p_base_init, p_curr_init, p_base_now, p_curr_now, s):
 
-    qqq_pct = s["ret_qqq"] * 100
-    goog_pct = s["ret_goog"] * 100
+    base_pct = s["ret_base"] * 100
+    curr_pct = s["ret_curr"] * 100
     diff_pct = s["strategy_diff"] * 100
 
-    remaining = (
-        THRESHOLD
-        - s["strategy_diff"]
-    ) * 100
+    remaining = (THRESHOLD - s["strategy_diff"]) * 100
 
     if s["triggered"]:
         status = (
             f"🚨 已達 7% 轉單門檻\n"
-            f"轉單方向：{hold} → {s['target']}"
+            f"轉單方向：{current_hold} → {base_hold}"
         )
     else:
         status = (
-            f"📌 目前維持：{hold}\n"
-            f"距離 {hold} → {s['target']} "
+            f"📌 目前維持：{current_hold}\n"
+            f"距離 {current_hold} → {base_hold} "
             f"門檻還有：{remaining:.2f}%"
         )
 
-    now = pd.Timestamp.now(
-        tz="Asia/Taipei"
-    )
-
+    now = pd.Timestamp.now(tz="Asia/Taipei")
     pnl_status = "領先" if s["pnl_diff"] >= 0 else "落後"
 
     return (
-        f"ℹ️ *【{qqq_ticker} / GOOGL 每日策略報告】*\n\n"
+        f"ℹ️️ *【{current_hold} / {base_hold} 策略追蹤報告】*\n\n"
 
         f"時間：`{now.strftime('%Y-%m-%d %H:%M')}`\n"
-        f"目前持股：`{hold}`\n"
+        f"目前持股：`{current_hold}`\n"
         f"持股股數：`{shares:.5f}`\n\n"
 
         "-------------------------------\n"
 
         "📊 *目前價格*\n"
-        f"{qqq_ticker}：`${p_qqq:.2f}`\n"
-        f"GOOGL：`${p_googl:.2f}`\n\n"
+        f"{current_hold}：`${p_curr_now:.2f}`\n"
+        f"{base_hold}：`${p_base_now:.2f}`\n\n"
 
         "📈 *自基準價格報酬*\n"
-        f"{qqq_ticker}：`{qqq_pct:+.2f}%` (基準 ${base_qqq:.2f})\n"
-        f"GOOGL：`{goog_pct:+.2f}%` (基準 ${base_goog:.2f})\n\n"
+        f"{current_hold}：`{curr_pct:+.2f}%` (基準 ${p_curr_init:.2f})\n"
+        f"{base_hold}：`{base_pct:+.2f}%` (基準 ${p_base_init:.2f})\n\n"
 
         "-------------------------------\n"
 
         "⚖️ *相對績效與損益追蹤*\n"
         f"持股相對價差落後：`{diff_pct:+.2f}%`\n"
         f"目前持股市值：`${s['current_val']:,.2f}`\n"
-        f"若留在原標的市值：`${s['hypo_val']:,.2f}`\n"
+        f"若留在 {base_hold} 市值：`${s['hypo_val']:,.2f}`\n"
         f"機會成本{pnl_status}：`${s['pnl_diff']:,.2f}`\n\n"
 
         f"{status}"
@@ -326,73 +274,56 @@ def build_report(
 # 轉單警報
 # ==========================================
 
-def build_trigger(
-    hold,
-    target,
-    shares,
-    sell,
-    buy,
-    diff
-):
+def build_trigger(base_hold, current_hold, shares, sell, buy, diff):
 
     cash = shares * sell
     buy_shares = int(cash // buy)
 
     return (
-        f"🚨 *【{hold} / {target} 7% 輪動警報】*\n\n"
+        f"🚨 *【{current_hold} / {base_hold} 7% 輪動警報】*\n\n"
 
-        f"目前持股：`{hold}`\n"
-        f"相對價差：`{diff:+.2f}%`\n"
+        f"目前持股：`{current_hold}`\n"
+        f"相對價差落後：`{diff:+.2f}%`\n"
         f"觸發門檻：`7.00%`\n\n"
 
         "-------------------------------\n"
 
-        f"1. *賣出 {hold}*\n"
+        f"1. *賣出 {current_hold}*\n"
         f"股數：`{shares:.5f}`\n"
         f"參考價格：`${sell:.2f}`\n"
         f"預估金額：`${cash:,.2f}`\n\n"
 
-        f"2. *買入 {target}*\n"
+        f"2. *買入 {base_hold}*\n"
         f"預估股數：`{buy_shares}`\n"
         f"參考價格：`${buy:.2f}`\n\n"
 
         "⚠️ 請僅操作上述策略部位。\n\n"
 
-        "完成交易後，"
-        "請在 config.csv 最下方新增一列，"
-        f"current_hold 改成 `{target}`。"
+        "完成交易後，請在 config.csv 最下方新增一列：\n"
+        f"base_hold 改為 `{current_hold}`，current_hold 改為 `{base_hold}`。"
     )
 
 
 # ==========================================
-# 績效圖
+# 績效圖生成
 # ==========================================
 
-def generate_chart(cfg, qqq_ticker, triggered=False, diff=0):
+def generate_chart(cfg, base_hold, current_hold, triggered=False, diff=0):
 
     try:
-
-        start = str(
-            cfg["trade_date"].iloc[0]
-        )
+        start = str(cfg["trade_date"].iloc[0])
 
         data = yf.download(
-            [qqq_ticker, "GOOGL"],
+            [base_hold, current_hold],
             start=start,
             auto_adjust=True,
             progress=False
         )
 
-        if isinstance(
-            data.columns,
-            pd.MultiIndex
-        ):
+        if isinstance(data.columns, pd.MultiIndex):
             data = data["Close"]
-
         else:
-            data = data[
-                [qqq_ticker, "GOOGL"]
-            ]
+            data = data[[base_hold, current_hold]]
 
         data = data.dropna()
 
@@ -400,143 +331,39 @@ def generate_chart(cfg, qqq_ticker, triggered=False, diff=0):
             return None
 
         first = cfg.iloc[0]
+        f_base_hold = str(first["base_hold"]).upper()
+        f_curr_hold = str(first["current_hold"]).upper()
+        f_base_price = float(first["base_hold_price"])
+        f_curr_price = float(first["current_hold_price"])
+        f_shares = float(first["shares_held"])
 
-        first_hold = str(
-            first["current_hold"]
-        ).upper()
+        initial_cash = f_shares * f_curr_price
 
-        qqq_base = float(
-            first["base_qqq_price"]
-        )
-
-        goog_base = float(
-            first["base_goog_price"]
-        )
-
-        shares = float(
-            first["shares_held"]
-        )
-
-        if first_hold in ["QQQM", "QQQ"]:
-            initial = shares * qqq_base
-        else:
-            initial = shares * goog_base
-
-        values = []
-        idx = 0
-        hold = first_hold
-        current_shares = shares
-
-        for date, row in data.iterrows():
-
-            date_str = date.strftime(
-                "%Y-%m-%d"
-            )
-
-            while (
-                idx + 1 < len(cfg)
-                and str(
-                    cfg["trade_date"].iloc[
-                        idx + 1
-                    ]
-                ) <= date_str
-            ):
-
-                idx += 1
-
-                current_shares = float(
-                    cfg["shares_held"].iloc[idx]
-                )
-
-                hold = str(
-                    cfg["current_hold"].iloc[idx]
-                ).upper()
-
-            price = (
-                row["GOOGL"]
-                if hold in ["GOOG", "GOOGL"]
-                else row[qqq_ticker]
-            )
-
-            values.append(
-                current_shares * float(price)
-            )
-
-        data["Strategy"] = values
-
-        data[f"B&H_{qqq_ticker}"] = (
-            initial / qqq_base
-        ) * data[qqq_ticker]
-
-        data["B&H_GOOGL"] = (
-            initial / goog_base
-        ) * data["GOOGL"]
-
-        final_strategy = data[
-            "Strategy"
-        ].iloc[-1]
-
-        final_qqq = data[
-            f"B&H_{qqq_ticker}"
-        ].iloc[-1]
-
-        final_goog = data[
-            "B&H_GOOGL"
-        ].iloc[-1]
-
-        ret_strategy = (
-            final_strategy / initial - 1
-        ) * 100
-
-        ret_qqq = (
-            final_qqq / initial - 1
-        ) * 100
-
-        ret_goog = (
-            final_goog / initial - 1
-        ) * 100
+        data[f"B&H_{f_base_hold}"] = (initial_cash / f_base_price) * data[f_base_hold]
+        data[f"B&H_{f_curr_hold}"] = (initial_cash / f_curr_price) * data[f_curr_hold]
 
         plt.figure(figsize=(10, 5))
 
         plt.plot(
             data.index,
-            data["B&H_GOOGL"],
-            label=(
-                f"B&H GOOGL "
-                f"{ret_goog:+.2f}%"
-            ),
+            data[f"B&H_{f_curr_hold}"],
+            label=f"Current Hold ({f_curr_hold})",
             color="limegreen",
-            linestyle="--",
-            linewidth=2
-        )
-
-        plt.plot(
-            data.index,
-            data[f"B&H_{qqq_ticker}"],
-            label=(
-                f"B&H {qqq_ticker} "
-                f"{ret_qqq:+.2f}%"
-            ),
-            color="royalblue",
             linestyle="--"
         )
 
         plt.plot(
             data.index,
-            data["Strategy"],
-            label=(
-                f"My Strategy "
-                f"{ret_strategy:+.2f}%"
-            ),
-            color="crimson",
-            linewidth=2
+            data[f"B&H_{f_base_hold}"],
+            label=f"Base Target ({f_base_hold})",
+            color="royalblue",
+            linestyle="--"
         )
 
         if triggered:
-
             plt.scatter(
                 data.index[-1],
-                data["Strategy"].iloc[-1],
+                data[f"B&H_{f_curr_hold}"].iloc[-1],
                 color="red",
                 marker="*",
                 s=250,
@@ -544,182 +371,104 @@ def generate_chart(cfg, qqq_ticker, triggered=False, diff=0):
                 zorder=5
             )
 
-            plt.annotate(
-                f"Trigger\n{diff:+.2f}%",
-                xy=(
-                    data.index[-1],
-                    data["Strategy"].iloc[-1]
-                ),
-                xytext=(-50, 25),
-                textcoords="offset points",
-                arrowprops={
-                    "arrowstyle": "->",
-                    "color": "red"
-                }
-            )
-
-        plt.title(
-            f"{qqq_ticker} / GOOGL Rotation Strategy"
-        )
-
+        plt.title(f"{f_curr_hold} vs {f_base_hold} Rotation Strategy")
         plt.xlabel("Date")
         plt.ylabel("Value (USD)")
 
         plt.legend()
-        plt.grid(
-            True,
-            linestyle=":",
-            alpha=0.6
-        )
+        plt.grid(True, linestyle=":", alpha=0.6)
 
         plt.tight_layout()
-        plt.savefig(
-            CHART_FILE,
-            dpi=150
-        )
+        plt.savefig(CHART_FILE, dpi=150)
         plt.close()
 
         return CHART_FILE
 
     except Exception as e:
-
-        print(
-            f"⚠️ 績效圖失敗：{e}"
-        )
-
+        print(f"⚠️ 績效圖失敗：{e}")
         traceback.print_exc()
-
         return None
 
 
 # ==========================================
-# 主監控
+# 主監控流程
 # ==========================================
 
 def run(mode="intraday"):
 
     print("=" * 60)
-    print(
-        "📡 QQQ/QQQM / GOOGL "
-        "Rotation Monitor"
-    )
+    print("📡 Portfolio Rotation Monitor")
     print("=" * 60)
 
     cfg = load_config()
     last = cfg.iloc[-1]
 
-    hold = str(
-        last["current_hold"]
-    ).upper().strip()
+    base_hold = str(last["base_hold"]).upper().strip()
+    current_hold = str(last["current_hold"]).upper().strip()
 
-    base_qqq = float(
-        last["base_qqq_price"]
-    )
+    p_base_init = float(last["base_hold_price"])
+    p_curr_init = float(last["current_hold_price"])
+    shares = float(last["shares_held"])
 
-    base_goog = float(
-        last["base_goog_price"]
-    )
-
-    shares = float(
-        last["shares_held"]
-    )
-
-    qqq_ticker, p_qqq, p_googl = get_prices(hold)
+    p_base_now, p_curr_now = get_prices(base_hold, current_hold)
 
     s = calculate(
-        hold,
+        base_hold,
+        current_hold,
         shares,
-        base_qqq,
-        base_goog,
-        qqq_ticker,
-        p_qqq,
-        p_googl
+        p_base_init,
+        p_curr_init,
+        p_base_now,
+        p_curr_now
     )
 
-    # ======================================
-    # DAILY / MANUAL
-    # ======================================
-
     if mode in ["daily", "manual"]:
-
         msg = build_report(
-            hold,
+            base_hold,
+            current_hold,
             shares,
-            base_qqq,
-            base_goog,
-            qqq_ticker,
-            p_qqq,
-            p_googl,
+            p_base_init,
+            p_curr_init,
+            p_base_now,
+            p_curr_now,
             s
         )
-
-        notify(
-            msg,
-            line=(mode == "daily")
-        )
-
+        notify(msg, line=(mode == "daily"))
         chart = generate_chart(
             cfg,
-            qqq_ticker,
+            base_hold,
+            current_hold,
             triggered=s["triggered"],
             diff=s["strategy_diff"] * 100
         )
-
         if chart:
             send_photo(chart)
-
-        print(
-            "✅ 報告完成"
-        )
-
+        print("✅ 報告完成")
         return
 
-    # ======================================
-    # INTRADAY
-    # ======================================
-
     if s["triggered"]:
-
         msg = build_trigger(
-            hold,
-            s["target"],
+            base_hold,
+            current_hold,
             shares,
             s["sell"],
             s["buy"],
             s["strategy_diff"] * 100
         )
-
-        notify(
-            msg,
-            line=True
-        )
-
+        notify(msg, line=True)
         chart = generate_chart(
             cfg,
-            qqq_ticker,
+            base_hold,
+            current_hold,
             triggered=True,
             diff=s["strategy_diff"] * 100
         )
-
         if chart:
             send_photo(chart)
-
-        print(
-            "🚨 7% 轉單警報已發送"
-        )
-
+        print("🚨 7% 轉單警報已發送")
     else:
-
-        remaining = (
-            THRESHOLD
-            - s["strategy_diff"]
-        ) * 100
-
-        print(
-            f"🔕 未達門檻，"
-            f"距離觸發還有 "
-            f"{remaining:.2f}%"
-        )
+        remaining = (THRESHOLD - s["strategy_diff"]) * 100
+        print(f"🔕 未達門檻，距離觸發還有 {remaining:.2f}%")
 
 
 # ==========================================
@@ -729,35 +478,24 @@ def run(mode="intraday"):
 if __name__ == "__main__":
 
     if len(sys.argv) > 1:
-
         if sys.argv[1] == "--manual":
             mode = "manual"
-
         elif sys.argv[1] == "--daily":
             mode = "daily"
-
         else:
             mode = "intraday"
-
     else:
-
         mode = "intraday"
 
     try:
-
         run(mode)
-
     except Exception as e:
-
         print("=" * 60)
         print("❌ 程式發生錯誤")
         print("=" * 60)
-
         print(e)
-
         traceback.print_exc()
-
         send_telegram(
-            "❌ *【QQQ/GOOGL Monitor 程式錯誤】*\n\n"
+            "❌ *【Rotation Monitor 程式錯誤】*\n\n"
             f"`{str(e)[:3000]}`"
         )
