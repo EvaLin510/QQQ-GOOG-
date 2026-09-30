@@ -1,4 +1,4 @@
-```python
+python
 import sys
 import os
 import traceback
@@ -832,4 +832,4 @@ if __name__ == "__main__":
             "❌ *【QQQM / GOOG Monitor 程式錯誤】*\n\n"
             f"`{str(e)[:3000]}`"
         )
-```
+
