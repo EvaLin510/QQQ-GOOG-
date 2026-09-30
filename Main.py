@@ -189,8 +189,9 @@ def calculate(base_hold, current_hold, shares, p_base_init, p_curr_init, p_base_
     ret_base = p_base_now / p_base_init - 1
     ret_curr = p_curr_now / p_curr_init - 1
 
-    # 計算基準標的相對目前持股的領先/落後幅度 (當 base 表現遠優於 current 時觸發換回)
-    diff = ret_base - ret_curr
+    # 正確邏輯：持股（current）贏過 對照標的（base）的幅度
+    # 只有當目前持股表現遠優於對照標的（+7% 以上）時才觸發止盈換股
+    strategy_diff = ret_curr - ret_base
 
     # 現有持股市值
     current_val = shares * p_curr_now
@@ -204,8 +205,8 @@ def calculate(base_hold, current_hold, shares, p_base_init, p_curr_init, p_base_
     return {
         "ret_base": ret_base,
         "ret_curr": ret_curr,
-        "strategy_diff": diff,
-        "triggered": diff > THRESHOLD,
+        "strategy_diff": strategy_diff,
+        "triggered": strategy_diff > THRESHOLD,  # 贏 7% 以上才觸發
         "sell": p_curr_now,
         "buy": p_base_now,
         "current_val": current_val,
