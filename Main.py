@@ -144,6 +144,10 @@ def load_config():
 
     df = pd.read_csv(CONFIG_FILE)
 
+    # 允許欄位相容 base_qqq_price 與 base_qqqm_price
+    if "base_qqqm_price" in df.columns and "base_qqq_price" not in df.columns:
+        df.rename(columns={"base_qqqm_price": "base_qqq_price"}, inplace=True)
+
     required = [
         "trade_date",
         "action",
@@ -176,51 +180,56 @@ def load_config():
 # 即時價格
 # ==========================================
 
-def get_prices():
-    tickers = yf.Tickers("QQQM GOOG")
+def get_prices(hold):
+    # 依據目前持股判斷需要抓取 QQQM 還是 QQQ，對照檔固定為 GOOGL
+    qqq_ticker = "QQQ" if hold == "QQQ" else "QQQM"
+    tickers = yf.Tickers(f"{qqq_ticker} GOOGL")
 
-    qqqm = float(
-        tickers.tickers["QQQM"]
-        .fast_info["last_price"]
-    )
+    p_qqq = float(tickers.tickers[qqq_ticker].fast_info["last_price"])
+    p_googl = float(tickers.tickers["GOOGL"].fast_info["last_price"])
 
-    goog = float(
-        tickers.tickers["GOOG"]
-        .fast_info["last_price"]
-    )
-
-    if not np.isfinite(qqqm) or not np.isfinite(goog):
+    if not np.isfinite(p_qqq) or not np.isfinite(p_googl):
         raise ValueError(
-            f"無效價格：QQQM={qqqm}, GOOG={goog}"
+            f"無效價格：{qqq_ticker}={p_qqq}, GOOGL={p_googl}"
         )
 
-    return qqqm, goog
+    return qqq_ticker, p_qqq, p_googl
 
 
 # ==========================================
 # 策略計算
 # ==========================================
 
-def calculate(hold, base_qqq, base_goog, qqqm, goog):
+def calculate(hold, shares, base_qqq, base_goog, qqq_ticker, p_qqq, p_googl):
 
-    ret_qqq = qqqm / base_qqq - 1
-    ret_goog = goog / base_goog - 1
+    ret_qqq = p_qqq / base_qqq - 1
+    ret_goog = p_googl / base_goog - 1
 
     diff = ret_qqq - ret_goog
 
     hold = hold.upper().strip()
 
-    if hold == "GOOG":
-        strategy_diff = diff
-        target = "QQQM"
-        sell = goog
-        buy = qqqm
-
-    elif hold == "QQQM":
+    if hold in ["QQQM", "QQQ"]:
         strategy_diff = -diff
-        target = "GOOG"
-        sell = qqqm
-        buy = goog
+        target = "GOOGL"
+        sell = p_qqq
+        buy = p_googl
+        
+        # 計算持股價值與換算機會成本
+        current_val = shares * p_qqq
+        hypo_val = (shares * base_qqq / base_goog) * p_googl
+        pnl_diff = current_val - hypo_val
+
+    elif hold in ["GOOG", "GOOGL"]:
+        strategy_diff = diff
+        target = "QQQM" if hold == "GOOG" else "QQQ"  # 預設買回 QQQ 或 QQQM
+        sell = p_googl
+        buy = p_qqq
+        
+        # 持有 GOOGL 狀況下的機會成本計算
+        current_val = shares * p_googl
+        hypo_val = (shares * base_goog / base_qqq) * p_qqq
+        pnl_diff = current_val - hypo_val
 
     else:
         raise ValueError(
@@ -235,7 +244,10 @@ def calculate(hold, base_qqq, base_goog, qqqm, goog):
         "target": target,
         "triggered": strategy_diff > THRESHOLD,
         "sell": sell,
-        "buy": buy
+        "buy": buy,
+        "current_val": current_val,
+        "hypo_val": hypo_val,
+        "pnl_diff": pnl_diff
     }
 
 
@@ -248,8 +260,9 @@ def build_report(
     shares,
     base_qqq,
     base_goog,
-    qqqm,
-    goog,
+    qqq_ticker,
+    p_qqq,
+    p_googl,
     s
 ):
 
@@ -274,25 +287,14 @@ def build_report(
             f"門檻還有：{remaining:.2f}%"
         )
 
-    if s["diff"] > 0:
-        relative = (
-            f"QQQM 領先 GOOG："
-            f"{s['diff'] * 100:.2f}%"
-        )
-    elif s["diff"] < 0:
-        relative = (
-            f"GOOG 領先 QQQM："
-            f"{abs(s['diff']) * 100:.2f}%"
-        )
-    else:
-        relative = "QQQM / GOOG 績效相同"
-
     now = pd.Timestamp.now(
         tz="Asia/Taipei"
     )
 
+    pnl_status = "領先" if s["pnl_diff"] >= 0 else "落後"
+
     return (
-        "ℹ️ *【QQQM / GOOG 每日策略報告】*\n\n"
+        f"ℹ️ *【{qqq_ticker} / GOOGL 每日策略報告】*\n\n"
 
         f"時間：`{now.strftime('%Y-%m-%d %H:%M')}`\n"
         f"目前持股：`{hold}`\n"
@@ -301,21 +303,20 @@ def build_report(
         "-------------------------------\n"
 
         "📊 *目前價格*\n"
-        f"QQQM：`${qqqm:.2f}`\n"
-        f"GOOG：`${goog:.2f}`\n\n"
+        f"{qqq_ticker}：`${p_qqq:.2f}`\n"
+        f"GOOGL：`${p_googl:.2f}`\n\n"
 
         "📈 *自基準價格報酬*\n"
-        f"QQQM：`{qqq_pct:+.2f}%` "
-        f"(基準 ${base_qqq:.2f})\n"
-        f"GOOG：`{goog_pct:+.2f}%` "
-        f"(基準 ${base_goog:.2f})\n\n"
+        f"{qqq_ticker}：`{qqq_pct:+.2f}%` (基準 ${base_qqq:.2f})\n"
+        f"GOOGL：`{goog_pct:+.2f}%` (基準 ${base_goog:.2f})\n\n"
 
         "-------------------------------\n"
 
-        "⚖️ *相對績效*\n"
-        f"{relative}\n"
-        f"目前持股角度差距：`{diff_pct:+.2f}%`\n"
-        f"轉單門檻：`7.00%`\n\n"
+        "⚖️ *相對績效與損益追蹤*\n"
+        f"持股相對價差落後：`{diff_pct:+.2f}%`\n"
+        f"目前持股市值：`${s['current_val']:,.2f}`\n"
+        f"若留在原標的市值：`${s['hypo_val']:,.2f}`\n"
+        f"機會成本{pnl_status}：`${s['pnl_diff']:,.2f}`\n\n"
 
         f"{status}"
     )
@@ -338,7 +339,7 @@ def build_trigger(
     buy_shares = int(cash // buy)
 
     return (
-        "🚨 *【QQQM / GOOG 7% 輪動警報】*\n\n"
+        f"🚨 *【{hold} / {target} 7% 輪動警報】*\n\n"
 
         f"目前持股：`{hold}`\n"
         f"相對價差：`{diff:+.2f}%`\n"
@@ -367,7 +368,7 @@ def build_trigger(
 # 績效圖
 # ==========================================
 
-def generate_chart(cfg, triggered=False, diff=0):
+def generate_chart(cfg, qqq_ticker, triggered=False, diff=0):
 
     try:
 
@@ -376,7 +377,7 @@ def generate_chart(cfg, triggered=False, diff=0):
         )
 
         data = yf.download(
-            ["QQQM", "GOOG"],
+            [qqq_ticker, "GOOGL"],
             start=start,
             auto_adjust=True,
             progress=False
@@ -390,7 +391,7 @@ def generate_chart(cfg, triggered=False, diff=0):
 
         else:
             data = data[
-                ["QQQM", "GOOG"]
+                [qqq_ticker, "GOOGL"]
             ]
 
         data = data.dropna()
@@ -416,14 +417,10 @@ def generate_chart(cfg, triggered=False, diff=0):
             first["shares_held"]
         )
 
-        if first_hold == "QQQM":
+        if first_hold in ["QQQM", "QQQ"]:
             initial = shares * qqq_base
         else:
             initial = shares * goog_base
-
-        # ----------------------------------
-        # 策略資產曲線
-        # ----------------------------------
 
         values = []
         idx = 0
@@ -456,9 +453,9 @@ def generate_chart(cfg, triggered=False, diff=0):
                 ).upper()
 
             price = (
-                row["GOOG"]
-                if hold == "GOOG"
-                else row["QQQM"]
+                row["GOOGL"]
+                if hold in ["GOOG", "GOOGL"]
+                else row[qqq_ticker]
             )
 
             values.append(
@@ -467,24 +464,24 @@ def generate_chart(cfg, triggered=False, diff=0):
 
         data["Strategy"] = values
 
-        data["B&H_QQQM"] = (
+        data[f"B&H_{qqq_ticker}"] = (
             initial / qqq_base
-        ) * data["QQQM"]
+        ) * data[qqq_ticker]
 
-        data["B&H_GOOG"] = (
+        data["B&H_GOOGL"] = (
             initial / goog_base
-        ) * data["GOOG"]
+        ) * data["GOOGL"]
 
         final_strategy = data[
             "Strategy"
         ].iloc[-1]
 
         final_qqq = data[
-            "B&H_QQQM"
+            f"B&H_{qqq_ticker}"
         ].iloc[-1]
 
         final_goog = data[
-            "B&H_GOOG"
+            "B&H_GOOGL"
         ].iloc[-1]
 
         ret_strategy = (
@@ -499,17 +496,13 @@ def generate_chart(cfg, triggered=False, diff=0):
             final_goog / initial - 1
         ) * 100
 
-        # ----------------------------------
-        # 畫圖
-        # ----------------------------------
-
         plt.figure(figsize=(10, 5))
 
         plt.plot(
             data.index,
-            data["B&H_GOOG"],
+            data["B&H_GOOGL"],
             label=(
-                f"B&H GOOG "
+                f"B&H GOOGL "
                 f"{ret_goog:+.2f}%"
             ),
             color="limegreen",
@@ -519,9 +512,9 @@ def generate_chart(cfg, triggered=False, diff=0):
 
         plt.plot(
             data.index,
-            data["B&H_QQQM"],
+            data[f"B&H_{qqq_ticker}"],
             label=(
-                f"B&H QQQM "
+                f"B&H {qqq_ticker} "
                 f"{ret_qqq:+.2f}%"
             ),
             color="royalblue",
@@ -566,7 +559,7 @@ def generate_chart(cfg, triggered=False, diff=0):
             )
 
         plt.title(
-            "QQQM / GOOG Rotation Strategy"
+            f"{qqq_ticker} / GOOGL Rotation Strategy"
         )
 
         plt.xlabel("Date")
@@ -607,7 +600,7 @@ def run(mode="intraday"):
 
     print("=" * 60)
     print(
-        "📡 QQQM / GOOG "
+        "📡 QQQ/QQQM / GOOGL "
         "Rotation Monitor"
     )
     print("=" * 60)
@@ -631,84 +624,20 @@ def run(mode="intraday"):
         last["shares_held"]
     )
 
-    print(
-        f"目前持股：{hold}"
-    )
-
-    print(
-        f"持股股數：{shares}"
-    )
-
-    print(
-        f"QQQM 基準：${base_qqq:.2f}"
-    )
-
-    print(
-        f"GOOG 基準：${base_goog:.2f}"
-    )
-
-    # --------------------------------------
-    # 即時價格
-    # --------------------------------------
-
-    qqqm, goog = get_prices()
-
-    print()
-    print(
-        f"QQQM：${qqqm:.2f}"
-    )
-
-    print(
-        f"GOOG：${goog:.2f}"
-    )
-
-    # --------------------------------------
-    # 策略
-    # --------------------------------------
+    qqq_ticker, p_qqq, p_googl = get_prices(hold)
 
     s = calculate(
         hold,
+        shares,
         base_qqq,
         base_goog,
-        qqqm,
-        goog
-    )
-
-    print()
-    print(
-        f"QQQM 報酬："
-        f"{s['ret_qqq'] * 100:+.2f}%"
-    )
-
-    print(
-        f"GOOG 報酬："
-        f"{s['ret_goog'] * 100:+.2f}%"
-    )
-
-    print(
-        f"QQQM - GOOG："
-        f"{s['diff'] * 100:+.2f}%"
-    )
-
-    print(
-        f"目前持股相對差距："
-        f"{s['strategy_diff'] * 100:+.2f}%"
-    )
-
-    print(
-        f"轉單方向："
-        f"{hold} → {s['target']}"
-    )
-
-    print(
-        f"7% 門檻："
-        f"{'已觸發' if s['triggered'] else '未觸發'}"
+        qqq_ticker,
+        p_qqq,
+        p_googl
     )
 
     # ======================================
     # DAILY / MANUAL
-    #
-    # 直接發結果
     # ======================================
 
     if mode in ["daily", "manual"]:
@@ -718,8 +647,9 @@ def run(mode="intraday"):
             shares,
             base_qqq,
             base_goog,
-            qqqm,
-            goog,
+            qqq_ticker,
+            p_qqq,
+            p_googl,
             s
         )
 
@@ -730,6 +660,7 @@ def run(mode="intraday"):
 
         chart = generate_chart(
             cfg,
+            qqq_ticker,
             triggered=s["triggered"],
             diff=s["strategy_diff"] * 100
         )
@@ -745,8 +676,6 @@ def run(mode="intraday"):
 
     # ======================================
     # INTRADAY
-    #
-    # 達 7% 才通知
     # ======================================
 
     if s["triggered"]:
@@ -767,6 +696,7 @@ def run(mode="intraday"):
 
         chart = generate_chart(
             cfg,
+            qqq_ticker,
             triggered=True,
             diff=s["strategy_diff"] * 100
         )
@@ -828,7 +758,6 @@ if __name__ == "__main__":
         traceback.print_exc()
 
         send_telegram(
-            "❌ *【QQQM / GOOG Monitor 程式錯誤】*\n\n"
+            "❌ *【QQQ/GOOGL Monitor 程式錯誤】*\n\n"
             f"`{str(e)[:3000]}`"
         )
-
