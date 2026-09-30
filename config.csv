@@ -1,2 +1,2 @@
-trade_date,action,current_hold,base_qqqm_price,base_goog_price,shares_held
-2026-06-08,BUY_GOOGL,GOOGL,283.98,348.00,85.35172
+trade_date,action,current_hold,target_hold,base_hold_price,base_target_price,shares_held
+2026-06-08,BUY_GOOGL,GOOGL,QQQM,348.00,283.98,85.35172
