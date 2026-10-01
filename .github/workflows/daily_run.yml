@@ -4,7 +4,7 @@ on:
   schedule:
     # 盤中監控：
     # GitHub 使用 UTC
-    # 台灣時間 21:00 ~ 04:45
+    # 台灣時間 21:00 ~ 04:45（週一至週五）
     # 每 15 分鐘執行一次
     - cron: '*/15 13-20 * * 1-5'
 
@@ -34,20 +34,7 @@ jobs:
           pip install -r requirements.txt
 
       # ==========================================
-      # 顯示目前執行模式
-      # ==========================================
-      - name: Show execution mode
-        run: |
-          echo "GitHub Event: ${{ github.event_name }}"
-
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "Mode: MANUAL"
-          else
-            echo "Mode: SCHEDULED"
-          fi
-
-      # ==========================================
-      # 執行策略監控
+      # 根據觸發事件與時間，判定執行模式並執行 Main.py
       # ==========================================
       - name: Run Main.py
         env:
@@ -60,7 +47,10 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "🧪 手動執行：python Main.py --manual"
             python Main.py --manual
+          elif [ "${{ github.event.schedule }}" = "0 1 * * *" ]; then
+            echo "🌅 每日晨報時間（台灣 09:00）：python Main.py --daily"
+            python Main.py --daily
           else
-            echo "⏰ 排程執行：python Main.py"
+            echo "⏰ 盤中監控：python Main.py"
             python Main.py
           fi
