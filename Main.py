@@ -1,7 +1,6 @@
 import sys
 import os
 import traceback
-
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -243,7 +242,7 @@ def build_report(base_hold, current_hold, shares, p_base_init, p_curr_init, p_ba
     pnl_status = "領先" if s["pnl_diff"] >= 0 else "落後"
 
     return (
-        f"ℹ️️ *【{current_hold} / {base_hold} 策略追蹤報告】*\n\n"
+        f"ℹ *【{current_hold} / {base_hold} 策略追蹤報告】*\n\n"
 
         f"時間：`{now.strftime('%Y-%m-%d %H:%M')}`\n"
         f"目前持股：`{current_hold}`\n"
@@ -386,7 +385,7 @@ def generate_chart(cfg, base_hold, current_hold, triggered=False, diff=0):
         return CHART_FILE
 
     except Exception as e:
-        print(f"⚠️ 績效圖失敗：{e}")
+        print(f"⚠️️ 績效圖失敗：{e}")
         traceback.print_exc()
         return None
 
@@ -398,7 +397,7 @@ def generate_chart(cfg, base_hold, current_hold, triggered=False, diff=0):
 def run(mode="intraday"):
 
     print("=" * 60)
-    print("📡 Portfolio Rotation Monitor")
+    print(f"📡 Portfolio Rotation Monitor [Mode: {mode.upper()}]")
     print("=" * 60)
 
     cfg = load_config()
@@ -478,15 +477,13 @@ def run(mode="intraday"):
 
 if __name__ == "__main__":
 
-    if len(sys.argv) > 1:
-        if sys.argv[1] == "--manual":
-            mode = "manual"
-        elif sys.argv[1] == "--daily":
-            mode = "daily"
-        else:
-            mode = "intraday"
-    else:
-        mode = "intraday"
+    args = sys.argv[1:]
+    mode = "intraday"
+
+    if "--manual" in args:
+        mode = "manual"
+    elif "--daily" in args:
+        mode = "daily"
 
     try:
         run(mode)
